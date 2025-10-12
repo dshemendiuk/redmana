@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Redmana",
+  "version": "0.1.0",
+  "description": "A Chrome extension to enhance the Redmine user experience, making it more like Asana.",
+  "permissions": [
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*/*"
+      ],
+      "js": ["content.js"],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["jquery-initializer.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+/* Redmana extension styles */
+
+/* Style for the jQuery UI Sortable placeholder */
+.sortable-placeholder {
+  background-color: #c8ebfb !important;
+  border: 2px dashed #00aaff;
+  visibility: visible !important;
+  height: 50px; /* Or match column height */
+}
+
+/* Make the cursor a move icon on draggable headers */
+table.list.issues-board > thead > tr > th {
+    cursor: move;
+}
+
+/* Style for the primary action button (e.g., 'Update task') */
+.redmana-primary-button {
+    background-color: #169 !important;
+    border-color: #169 !important;
+    color: #fff !important;
+    font-weight: bold !important;
+}
+
+.redmana-primary-button:hover {
+    background-color: #08517C !important;
+    border-color: #08517C !important;
+    color: white !important;
+}
+
+.redmana-primary-button svg.icon-svg {
+    mix-blend-mode: screen;
+}
+
+/* --- Lightbox Styles --- */
+.redmana-lightbox-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+.redmana-lightbox-content img {
+    max-width: 90vw;
+    max-height: 90vh;
+    display: block;
+    margin: auto;
+}
