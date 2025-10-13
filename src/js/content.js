@@ -12,8 +12,6 @@ const LATEST_OPTGROUP_LABEL = 'Latest';
 const ASSIGNEE_SELECT_SELECTOR = 'select[name="issue[assigned_to_id]"]';
 const SELECTED_CLASS = 'redmana-issue-selected';
 const BODY_DRAWER_CLASS = 'redmana-drawer-open';
-const DEFAULT_DRAWER_WIDTH = 720;
-
 function injectScript() {
     const script = document.createElement('script');
     script.src = chrome.runtime.getURL('board-enhancer.js');
@@ -42,6 +40,7 @@ function isLikelyRedmine() {
     const body = document.body;
     if (!body) return false;
 
+    if (document.querySelector('meta[name="description"][content*="Redmine"]')) return true;
     if (document.querySelector('meta[name="application-name"][content*="Redmine"]')) return true;
     if (document.querySelector('meta[name="generator"][content*="Redmine"]')) return true;
 
@@ -61,7 +60,28 @@ function isLikelyRedmine() {
     return false;
 }
 
+
+function navigateToIssuePage(issueUrl, reason) {
+    try {
+        console.warn('Redmana: falling back to standard issue view.', reason);
+    } catch (error) {
+        // no-op
+    }
+    forceCloseDrawer();
+    const resolved = resolveIssueUrl(issueUrl);
+    window.location.assign(resolved);
+}
+function forceCloseDrawer() {
+    if (drawerState.isOpen) {
+        closeDrawerInternal();
+    }
+}
+
 const isRedmine = isLikelyRedmine();
+
+if (isRedmine && document.body) {
+    document.body.classList.add('redmana-loaded');
+}
 
 if (isRedmine && window.location.pathname.includes('/agile/board')) {
     if (document.readyState === 'complete') {
@@ -151,11 +171,7 @@ const drawerState = {
     closePending: false,
     activeController: null,
     activeRequestToken: null,
-    selectedElement: null,
-    layoutBackup: {
-        main: null,
-        content: null
-    }
+    selectedElement: null
 };
 
 let drawerElements = null;
@@ -307,7 +323,6 @@ function closeDrawerInternal() {
     drawerState.currentUrl = null;
     drawerState.closePending = false;
 
-    resetDrawerLayoutAdjustments();
     clearHighlightedIssue();
 
     if (drawerState.activeController) {
@@ -355,6 +370,11 @@ async function loadIssueIntoDrawer(issueUrl) {
 
         const html = await response.text();
 
+        if (!html || !html.trim()) {
+            navigateToIssuePage(issueUrl, 'Empty issue response.');
+            return;
+        }
+
         if (drawerState.activeRequestToken !== requestToken) {
             return;
         }
@@ -376,7 +396,8 @@ async function loadIssueIntoDrawer(issueUrl) {
         const content = doc.querySelector('#content');
 
         if (!content) {
-            throw new Error('Issue content not found in fetched HTML.');
+            navigateToIssuePage(issueUrl, 'Issue content container missing.');
+            return;
         }
 
         const clonedContent = content.cloneNode(true);
@@ -405,9 +426,8 @@ async function loadIssueIntoDrawer(issueUrl) {
             return;
         }
         console.error('Redmana: Failed to load issue into drawer.', error);
-        if (drawerState.activeRequestToken === requestToken) {
-            showDrawerError('Unable to load the task. Refresh the page or try again later.');
-        }
+        navigateToIssuePage(issueUrl, error && error.message ? error.message : error);
+        return;
     } finally {
         if (drawerState.activeController === controller) {
             drawerState.activeController = null;
@@ -625,60 +645,6 @@ function locateIssueElementFromAnchor(anchor) {
     return null;
 }
 
-function applyDrawerLayoutAdjustments(drawerWidth) {
-    const main = document.getElementById('main');
-    if (main) {
-        const currentScroll = main.scrollLeft;
-        if (!drawerState.layoutBackup.main) {
-            drawerState.layoutBackup.main = {
-                scrollLeft: currentScroll
-            };
-        } else {
-            drawerState.layoutBackup.main.scrollLeft = currentScroll;
-        }
-        main.scrollLeft = currentScroll;
-    }
-
-    const content = document.getElementById('content');
-    if (content) {
-        const currentScroll = content.scrollLeft;
-        if (!drawerState.layoutBackup.content) {
-            drawerState.layoutBackup.content = {
-                scrollLeft: currentScroll
-            };
-        } else {
-            drawerState.layoutBackup.content.scrollLeft = currentScroll;
-        }
-        content.style.removeProperty('width');
-        content.scrollLeft = currentScroll;
-    }
-}
-
-function resetDrawerLayoutAdjustments() {
-    if (drawerState.layoutBackup.main) {
-        const main = document.getElementById('main');
-        if (main) {
-            if (typeof drawerState.layoutBackup.main.scrollLeft === 'number') {
-                main.scrollLeft = drawerState.layoutBackup.main.scrollLeft;
-            }
-        }
-    }
-
-    if (drawerState.layoutBackup.content) {
-        const content = document.getElementById('content');
-        if (content) {
-            if (typeof drawerState.layoutBackup.content.scrollLeft === 'number') {
-                content.scrollLeft = drawerState.layoutBackup.content.scrollLeft;
-            }
-        }
-    }
-
-    drawerState.layoutBackup = {
-        main: null,
-        content: null
-    };
-}
-
 function openIssueDrawer(issueUrl, options = {}) {
     const elements = ensureDrawerElements();
 
@@ -709,10 +675,6 @@ function openIssueDrawer(issueUrl, options = {}) {
     if (document.body) {
         document.body.classList.add(BODY_DRAWER_CLASS);
     }
-
-    const drawerRect = elements.drawer.getBoundingClientRect();
-    const drawerWidth = drawerRect && drawerRect.width ? drawerRect.width : DEFAULT_DRAWER_WIDTH;
-    applyDrawerLayoutAdjustments(drawerWidth);
 
     loadIssueIntoDrawer(absoluteUrl);
 }
@@ -836,7 +798,12 @@ function rebuildLatestOptgroup(select) {
             select.value = currentValue;
         }
     } finally {
-        delete select.dataset.redmanaRebuilding;
+        setTimeout(() => {
+            // Allow MutationObserver callbacks triggered by this rebuild to settle before clearing the flag.
+            if (select.dataset.redmanaRebuilding === 'true') {
+                delete select.dataset.redmanaRebuilding;
+            }
+        }, 0);
     }
 }
 
