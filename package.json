@@ -1,0 +1,11 @@
+{
+  "name": "redmana-extension",
+  "version": "0.1.0",
+  "description": "Development tooling for the Redmana Chrome extension.",
+  "type": "module",
+  "scripts": {
+    "build:dev": "node scripts/build.mjs dev",
+    "build:watch": "node scripts/build.mjs watch",
+    "build:prod": "node scripts/build.mjs prod"
+  }
+}

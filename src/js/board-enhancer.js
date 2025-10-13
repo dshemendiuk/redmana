@@ -98,5 +98,65 @@
             }
         });
         console.log("Redmana: jQuery UI Sortable initialized from external file.");
+
+        // Auto-scroll while dragging issue cards near viewport edges
+        let isDraggingCard = false;
+        let lastPointerY = null;
+        let scrollAnimationFrame = null;
+
+        function updatePointerY(positionY) {
+            lastPointerY = positionY;
+            if (isDraggingCard && scrollAnimationFrame === null) {
+                scrollAnimationFrame = requestAnimationFrame(applyAutoScroll);
+            }
+        }
+
+        function applyAutoScroll() {
+            if (!isDraggingCard || lastPointerY === null) {
+                scrollAnimationFrame = null;
+                return;
+            }
+
+            const threshold = 80;
+            const scrollStep = 30;
+            const viewportHeight = window.innerHeight;
+
+            if (lastPointerY < threshold && window.scrollY > 0) {
+                window.scrollBy(0, -scrollStep);
+            } else if (lastPointerY > viewportHeight - threshold) {
+                window.scrollBy(0, scrollStep);
+            }
+
+            scrollAnimationFrame = requestAnimationFrame(applyAutoScroll);
+        }
+
+        function stopAutoScroll() {
+            isDraggingCard = false;
+            lastPointerY = null;
+            if (scrollAnimationFrame !== null) {
+                cancelAnimationFrame(scrollAnimationFrame);
+                scrollAnimationFrame = null;
+            }
+        }
+
+        $(document).on('sortstart.redmana', '.issue-status-col.ui-sortable', () => {
+            isDraggingCard = true;
+        });
+
+        $(document).on('sortstop.redmana sortcancel.redmana', '.issue-status-col.ui-sortable', () => {
+            stopAutoScroll();
+        });
+
+        document.addEventListener('mousemove', event => {
+            if (!isDraggingCard) return;
+            updatePointerY(event.clientY);
+        });
+
+        document.addEventListener('touchmove', event => {
+            if (!isDraggingCard) return;
+            if (event.touches && event.touches.length) {
+                updatePointerY(event.touches[0].clientY);
+            }
+        }, { passive: true });
     });
 })(window.jQuery);

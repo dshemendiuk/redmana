@@ -1,0 +1,342 @@
+/* Source SCSS for Redmana extension.
+   Currently mirrors the distributed CSS so we can evolve styling
+   with variables/mixins later without breaking the pipeline. */
+
+/* --- Lightbox Styles --- */
+.redmana-lightbox {
+  &-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 2147483600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  &-content {
+    img {
+      max-width: 90vw;
+      max-height: 90vh;
+      display: block;
+      margin: auto;
+    }
+  }
+}
+
+/* --- Drawer Styles --- */
+.redmana-drawer {
+  &-container {
+    position: fixed;
+    top: 0;
+    right: 0;
+    left: auto;
+    height: 100%;
+    width: min(720px, 100vw);
+    display: flex;
+    justify-content: flex-end;
+    pointer-events: none;
+    z-index: 2147483000;
+    transition: opacity 0.2s ease-in-out;
+
+    @media (max-width: 768px) {
+      .redmana-drawer {
+        width: 100%;
+
+        .redmana-drawer-header {
+          padding-top: 6px;
+          padding-bottom: 6px;
+        }
+      }
+    }
+
+    &.is-open {
+      pointer-events: auto;
+
+      .redmana-drawer {
+        transform: translateX(0);
+        opacity: 1;
+      }
+    }
+
+    .redmana-drawer {
+      width: min(720px, 100vw);
+      max-width: 100%;
+      background: #ffffff;
+      height: 100%;
+      box-shadow: -4px 0 16px rgba(0, 0, 0, 0.2);
+      transform: translateX(100%);
+      transition: transform 0.25s ease-in-out;
+      display: flex;
+      flex-direction: column;
+      pointer-events: auto;
+      opacity: 0;
+
+      .redmana-drawer-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 20px;
+        border-bottom: 1px solid #e5e5e5;
+        background: #f8f9fb;
+        gap: 12px;
+      }
+
+      .redmana-drawer-title {
+        font-size: 18px;
+        margin: 0;
+        font-weight: 600;
+        line-height: 1.2;
+        flex: 1 1 auto;
+        min-width: 0;
+
+        &-link {
+          color: inherit;
+          text-decoration: none;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          word-break: break-word;
+
+          &::after {
+            content: '↗';
+            font-size: 14px;
+            opacity: 0.6;
+          }
+
+          &:hover,
+          &:focus {
+            text-decoration: underline;
+          }
+        }
+      }
+
+      .redmana-drawer-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+      }
+
+      .redmana-drawer-close {
+        border: none;
+        background: none;
+        font-size: 26px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0 8px;
+        color: #5c5c5c;
+
+        &:hover {
+          color: #222;
+        }
+      }
+
+      .redmana-drawer-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 16px 20px 28px;
+        background: #ffffff;
+        -webkit-overflow-scrolling: touch;
+
+        .contextual {
+          display: flex;
+          justify-content: flex-end;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-bottom: 16px;
+
+          > * {
+            margin: 0 !important;
+          }
+
+          a {
+            white-space: nowrap;
+          }
+        }
+
+        .redmana-drawer-tabs {
+          margin-bottom: 12px;
+
+          ul {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+            border-bottom: 1px solid #d0d7de;
+
+            a {
+              display: block;
+              font-size: 0.9em;
+              text-decoration: none;
+              line-height: 1.3em;
+              padding: 4px 6px 4px 6px;
+              border: 1px solid #d0d7de;
+              border-bottom: 1px solid #d0d7de;
+              color: #999;
+              font-weight: bold;
+              border-top-left-radius: 3px;
+              border-top-right-radius: 3px;
+              position: relative;
+              top: 1px;
+
+              &:hover {
+                color: #777;
+              }
+
+              &.selected {
+                background-color: #fff;
+                border: 1px solid #d0d7de;
+                border-bottom: 1px solid #fff;
+                color: #444;
+              }
+            }
+          }
+        }
+      }
+
+      .redmana-drawer-loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        font-size: 16px;
+        color: #5f6b7c;
+      }
+
+      .redmana-drawer-alert {
+        background: #ffecec;
+        border: 1px solid #ffb4b4;
+        color: #b30000;
+        padding: 12px 14px;
+        border-radius: 4px;
+        margin-bottom: 15px;
+
+        &--hidden {
+          display: none;
+        }
+      }
+    }
+  }
+
+
+
+}
+
+@media (max-width: 720px) {
+  body.redmana-drawer-open {
+    #main {
+      margin-right: 0;
+    }
+  }
+}
+
+.redmana-drawer-toast {
+  position: absolute;
+  bottom: 24px;
+  right: 24px;
+  background: #2b2f77;
+  color: #ffffff;
+  padding: 10px 16px;
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: none;
+  font-size: 14px;
+
+  &.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  &--success {
+    background: #2e8540;
+  }
+
+  &--info {
+    background: #2b2f77;
+  }
+}
+
+/*
+ Overrides
+ */
+
+/* Redmana extension styles */
+
+.issues-board {
+  /* Style for the jQuery UI Sortable placeholder */
+  .sortable-placeholder {
+    background-color: #c8ebfb !important;
+    border: 2px dashed #00aaff;
+    visibility: visible !important;
+    height: 50px; /* Or match column height */
+  }
+
+  /* Make the cursor a move icon on draggable headers */
+  & > thead > tr > th {
+    cursor: move;
+  }
+}
+
+.agile-board .issue-card {
+  margin: 4px 0 8px 0;
+  padding: 6px;
+
+  &.redmana-issue-selected {
+    box-shadow: 0 0 0 2px #169;
+  }
+}
+
+tr {
+  &.redmana-issue-selected {
+    outline: 2px solid #169;
+  }
+}
+
+#content > .contextual > a.icon.icon-edit,
+.redmana-drawer-container .contextual > a.icon.icon-edit {
+  background-color: #169;
+  border-color: #169;
+  color: #fff;
+
+  &:hover {
+    background-color: #084265;
+  }
+
+  svg.icon-svg {
+    stroke: #fff;
+  }
+}
+
+.redmana-drawer-container {
+  .contextual > a.icon {
+    padding: 5px 8px;
+    border: 1px solid #ddd;
+    background-color: rgb(240, 240, 240);
+    border-radius: 4px;
+    text-align: center;
+  }
+
+  .tabular {
+    p {
+      padding-left: 120px;
+    }
+    label {
+      margin-left: -120px;
+      width: 115px;
+    }
+  }
+  .other-formats {
+    display: none;
+  }
+}
+
