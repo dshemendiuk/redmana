@@ -11,6 +11,31 @@
 
         if (!headerRow.length || !bodyRow.length) return;
 
+        function getStickyHeaderRows() {
+            return $('table.list.issues-board.sticky > thead > tr');
+        }
+
+        function reorderStickyColumns(orderIds) {
+            if (!Array.isArray(orderIds) || !orderIds.length) return;
+            const stickyRows = getStickyHeaderRows();
+            if (!stickyRows.length) return;
+
+            stickyRows.each(function() {
+                const row = $(this);
+                const stickyMap = new Map();
+                row.find('th[data-column-id]').each(function() {
+                    stickyMap.set($(this).data('column-id').toString(), this);
+                });
+
+                orderIds.forEach(id => {
+                    const th = stickyMap.get(id.toString());
+                    if (th) {
+                        row.append(th);
+                    }
+                });
+            });
+        }
+
         function saveColumnOrder() {
             const orderedIds = headerRow.find('th[data-column-id]').map(function() {
                 return $(this).data('column-id');
@@ -24,6 +49,7 @@
             if (!savedOrder) return;
             try {
                 const orderedIds = JSON.parse(savedOrder);
+                if (!Array.isArray(orderedIds) || !orderedIds.length) return;
                 const thMap = new Map();
                 headerRow.find('th[data-column-id]').each(function() {
                     thMap.set($(this).data('column-id').toString(), this);
@@ -40,6 +66,7 @@
                     if (th) headerRow.append(th);
                     if (td) bodyRow.append(td);
                 });
+                reorderStickyColumns(orderedIds);
                 console.log('Redmana: Applied saved order via jQuery UI.');
             } catch (e) {
                 console.error('Redmana: Failed to apply saved order.', e);
@@ -92,6 +119,8 @@
                         bodyRow.append(td);
                     }
                 });
+
+                reorderStickyColumns(newOrderIds);
 
                 // Now that the DOM is correct, save the order
                 saveColumnOrder();
