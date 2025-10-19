@@ -191,6 +191,7 @@ function shouldHandleIssueLink(anchor) {
     if (!href || href.startsWith('javascript:')) return false;
     if (anchor.target === '_blank' || anchor.hasAttribute('download')) return false;
     if (anchor.dataset.redmanaBypass === 'true') return false;
+    if (anchor.closest('.tabs')) return false;
 
     let url;
     try {
