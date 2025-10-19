@@ -12,6 +12,33 @@ const LATEST_OPTGROUP_LABEL = 'Latest';
 const ASSIGNEE_SELECT_SELECTOR = 'select[name="issue[assigned_to_id]"]';
 const SELECTED_CLASS = 'redmana-issue-selected';
 const BODY_DRAWER_CLASS = 'redmana-drawer-open';
+const CURRENT_HOST_CANONICAL = normalizeHostname(window.location.hostname || '');
+let lastKnownUrl = window.location.href;
+
+function normalizeHostname(rawHost) {
+    return (rawHost || '')
+        .toString()
+        .trim()
+        .replace(/:\d+$/, '')
+        .replace(/^www\./, '')
+        .toLowerCase();
+}
+
+function clearStaleDrawerState() {
+    try {
+        const state = history.state;
+        if (!state || state.redmanaDrawer !== true) {
+            return;
+        }
+        const nextState = { ...state };
+        delete nextState.redmanaDrawer;
+        const sanitized = Object.keys(nextState).length ? nextState : null;
+        history.replaceState(sanitized, '', window.location.href);
+    } catch (error) {
+        console.warn('Redmana: Failed to clear stale drawer history state.', error);
+    }
+    lastKnownUrl = window.location.href;
+}
 function injectScript() {
     const script = document.createElement('script');
     script.src = chrome.runtime.getURL('board-enhancer.js');
@@ -81,6 +108,10 @@ const isRedmine = isLikelyRedmine();
 
 if (isRedmine && document.body) {
     document.body.classList.add('redmana-loaded');
+}
+
+if (isRedmine) {
+    clearStaleDrawerState();
 }
 
 if (isRedmine && window.location.pathname.includes('/agile/board')) {
@@ -179,7 +210,16 @@ let assigneeObserver = null;
 
 function resolveIssueUrl(rawHref) {
     try {
-        return new URL(rawHref, window.location.origin).toString();
+        const url = new URL(rawHref, window.location.origin);
+        const urlHost = normalizeHostname(url.hostname);
+
+        if (window.location.protocol === 'https:' &&
+            url.protocol === 'http:' &&
+            urlHost === CURRENT_HOST_CANONICAL) {
+            url.protocol = 'https:';
+            url.port = '';
+        }
+        return url.toString();
     } catch (error) {
         console.error("Redmana: Failed to resolve issue URL.", error);
         return rawHref;
@@ -323,6 +363,7 @@ function closeDrawerInternal() {
     drawerState.baseUrl = null;
     drawerState.currentUrl = null;
     drawerState.closePending = false;
+    lastKnownUrl = window.location.href;
 
     clearHighlightedIssue();
 
@@ -387,6 +428,7 @@ async function loadIssueIntoDrawer(issueUrl) {
         if (drawerState.isOpen) {
             try {
                 history.replaceState({ redmanaDrawer: true }, '', effectiveIssueUrl);
+                lastKnownUrl = window.location.href;
             } catch (error) {
                 console.warn('Redmana: Failed to sync history state.', error);
             }
@@ -450,10 +492,7 @@ function normalizeLinks(drawerContent) {
         const href = link.getAttribute('href');
         if (!href || href.startsWith('#')) return;
 
-        // Ensure relative links keep working inside the drawer
-        if (href.startsWith('/')) {
-            link.href = resolveIssueUrl(href);
-        }
+        link.href = resolveIssueUrl(href);
     });
 }
 
@@ -516,14 +555,21 @@ async function submitIssueForm(form, issueUrl, statusMessage) {
         const response = await fetch(action, {
             method,
             credentials: 'include',
-            body: formData
+            body: formData,
+            redirect: 'manual'
         });
 
-        if (!response.ok) {
+        const isOpaqueRedirect = response.type === 'opaqueredirect';
+        const isRedirectStatus = response.status >= 300 && response.status < 400;
+
+        if (!response.ok && !isRedirectStatus && !isOpaqueRedirect) {
             throw new Error(`Failed to submit form (${response.status})`);
         }
 
-        await loadIssueIntoDrawer(issueUrl);
+        const redirectLocation = response.headers ? response.headers.get('Location') : null;
+        const nextUrl = redirectLocation ? resolveIssueUrl(redirectLocation) : issueUrl;
+
+        await loadIssueIntoDrawer(nextUrl);
         showTemporaryMessage('Task updated.', 'success');
     } catch (error) {
         console.error('Redmana: Failed to submit issue form.', error);
@@ -656,12 +702,14 @@ function openIssueDrawer(issueUrl, options = {}) {
         drawerState.baseUrl = window.location.href;
         try {
             history.pushState({ redmanaDrawer: true }, '', absoluteUrl);
+            lastKnownUrl = window.location.href;
         } catch (error) {
             console.warn('Redmana: Failed to push history state.', error);
         }
     } else {
         try {
             history.replaceState({ redmanaDrawer: true }, '', absoluteUrl);
+            lastKnownUrl = window.location.href;
         } catch (error) {
             console.warn('Redmana: Failed to replace history state.', error);
         }
@@ -695,9 +743,26 @@ function handleDocumentClick(event) {
     openIssueDrawer(issueUrl, { triggerElement: anchor });
 }
 
-function handlePopState() {
-    if (!drawerState.isOpen) return;
-    closeDrawerInternal();
+function handlePopState(event) {
+    const currentUrl = window.location.href;
+
+    if (drawerState.isOpen) {
+        closeDrawerInternal();
+        lastKnownUrl = window.location.href;
+        return;
+    }
+
+    const state = event && event.state;
+    const hasDrawerFlag = !!(state && state.redmanaDrawer === true);
+    const urlChanged = currentUrl !== lastKnownUrl;
+
+    if (!hasDrawerFlag && urlChanged) {
+        window.location.assign(currentUrl);
+        lastKnownUrl = currentUrl;
+        return;
+    }
+
+    lastKnownUrl = currentUrl;
 }
 
 function handleKeyDown(event) {
