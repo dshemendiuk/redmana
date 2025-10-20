@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import sass from 'sass';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -64,14 +65,6 @@ function basicJsMinify(code) {
     .join('\n');
 }
 
-function basicCssMinify(code) {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/\s{2,}/g, ' ')
-    .replace(/\n+/g, '\n')
-    .trim();
-}
-
 function copyManifest(outDir) {
   if (!fs.existsSync(SRC_MANIFEST)) return;
   ensureDir(outDir);
@@ -103,122 +96,12 @@ function writeJs(outDir, { minify }) {
 
 function compileStyles(outDir, { minify }) {
   if (!fs.existsSync(SRC_SCSS)) return;
-  const scss = fs.readFileSync(SRC_SCSS, 'utf8');
-  const css = compileScssToCss(scss);
-  const finalCss = minify ? basicCssMinify(css) : css;
-  fs.writeFileSync(path.join(outDir, 'styles.css'), finalCss, 'utf8');
-}
-
-function compileScssToCss(source) {
-  const cleaned = source.replace(/\r\n/g, '\n');
-  const root = { type: 'root', children: [], declarations: [] };
-  const stack = [root];
-  let buffer = '';
-  let i = 0;
-
-  function pushDeclaration(text) {
-    const current = stack[stack.length - 1];
-    const value = text.trim();
-    if (value) {
-      current.declarations.push(value.endsWith(';') ? value : `${value};`);
-    }
-  }
-
-  while (i < cleaned.length) {
-    const char = cleaned[i];
-
-    if (char === '/' && cleaned[i + 1] === '*') {
-      const end = cleaned.indexOf('*/', i + 2);
-      const comment = cleaned.slice(i, end + 2);
-      const current = stack[stack.length - 1];
-      current.declarations.push(comment);
-      i = end + 2;
-      buffer = '';
-      continue;
-    }
-
-    if (char === '{') {
-      const selector = buffer.trim();
-      buffer = '';
-      const node = selector.startsWith('@')
-        ? { type: 'atrule', selector, declarations: [], children: [] }
-        : { type: 'rule', selector, declarations: [], children: [] };
-      const parent = stack[stack.length - 1];
-      parent.children.push(node);
-      stack.push(node);
-      i += 1;
-      continue;
-    }
-
-    if (char === '}') {
-      pushDeclaration(buffer);
-      buffer = '';
-      stack.pop();
-      i += 1;
-      continue;
-    }
-
-    if (char === ';') {
-      pushDeclaration(buffer + ';');
-      buffer = '';
-      i += 1;
-      continue;
-    }
-
-    buffer += char;
-    i += 1;
-  }
-
-  const lines = [];
-
-  function expandSelectors(raw, parents) {
-    const parts = raw.split(',').map(part => part.trim()).filter(Boolean);
-    if (parents.length === 0) {
-      return parts;
-    }
-    const result = [];
-    parents.forEach(parentSel => {
-      parts.forEach(part => {
-        if (part.includes('&')) {
-          result.push(part.replace(/&/g, parentSel));
-        } else if (part.startsWith('@')) {
-          result.push(part);
-        } else {
-          result.push(`${parentSel} ${part}`.trim());
-        }
-      });
-    });
-    return result;
-  }
-
-  function emit(node, parents = [], indent = '') {
-    if (node.type === 'rule') {
-      const selectors = expandSelectors(node.selector, parents.length ? parents : ['']).map(s => s.trim()).filter(Boolean);
-      const effectiveSelectors = selectors.length ? selectors : parents;
-      if (node.declarations.length && effectiveSelectors.length) {
-        lines.push(`${indent}${effectiveSelectors.join(', ')} {`);
-        node.declarations.forEach(decl => {
-          lines.push(`${indent}  ${decl}`);
-        });
-        lines.push(`${indent}}`);
-      }
-      node.children.forEach(child => emit(child, effectiveSelectors, indent));
-    } else if (node.type === 'atrule') {
-      const childIndent = `${indent}  `;
-      lines.push(`${indent}${node.selector} {`);
-      node.declarations.forEach(decl => {
-        lines.push(`${childIndent}${decl}`);
-      });
-      node.children.forEach(child => emit(child, parents, childIndent));
-      lines.push(`${indent}}`);
-    } else if (node.type === 'root') {
-      node.declarations.forEach(decl => lines.push(decl));
-      node.children.forEach(child => emit(child, [], ''));
-    }
-  }
-
-  emit(root);
-  return `${lines.join('\n')}\n`;
+  const result = sass.compile(SRC_SCSS, {
+    style: minify ? 'compressed' : 'expanded',
+    loadPaths: [SRC_STYLES_DIR]
+  });
+  ensureDir(outDir);
+  fs.writeFileSync(path.join(outDir, 'styles.css'), `${result.css}\n`, 'utf8');
 }
 
 function copyMisc(outDir) {

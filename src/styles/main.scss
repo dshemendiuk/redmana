@@ -2,6 +2,8 @@
    Currently mirrors the distributed CSS so we can evolve styling
    with variables/mixins later without breaking the pipeline. */
 
+$issue-card-padding: 6px;
+
 /* --- Lightbox Styles --- */
 .redmana-lightbox {
   &-overlay {
@@ -282,17 +284,26 @@
   }
 
   /* Make the cursor a move icon on draggable headers */
-  & > thead > tr > th {
+  &:not(.sticky) > thead > tr > th {
     cursor: move;
   }
 }
 
 .agile-board .issue-card {
   margin: 4px 0 8px 0;
-  padding: 6px;
+  padding: $issue-card-padding;
 
   &.redmana-issue-selected {
     box-shadow: 0 0 0 2px #169;
+  }
+
+  .issue-id {
+    padding: $issue-card-padding;
+    margin: (-$issue-card-padding) (-$issue-card-padding) 4px (-$issue-card-padding);
+    background-color: rgba(0, 0, 0, 0.02);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    font-size: 0.75rem;
+    cursor: move;
   }
 }
 
