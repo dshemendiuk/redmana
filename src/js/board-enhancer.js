@@ -11,6 +11,9 @@
 
         if (!headerRow.length || !bodyRow.length) return;
 
+        let suppressOrderObserver = false;
+        let reapplyScheduled = false;
+
         function getStickyHeaderRows() {
             return $('table.list.issues-board.sticky > thead > tr');
         }
@@ -36,6 +39,19 @@
             });
         }
 
+        function getSavedOrder() {
+            const savedOrder = localStorage.getItem('redmanaColumnOrder');
+            if (!savedOrder) return null;
+            try {
+                const orderedIds = JSON.parse(savedOrder);
+                if (!Array.isArray(orderedIds) || !orderedIds.length) return null;
+                return orderedIds.map(id => id.toString());
+            } catch (e) {
+                console.error('Redmana: Failed to parse saved column order.', e);
+                return null;
+            }
+        }
+
         function saveColumnOrder() {
             const orderedIds = headerRow.find('th[data-column-id]').map(function() {
                 return $(this).data('column-id');
@@ -44,32 +60,50 @@
             console.log('Redmana: New order saved via jQuery UI.', orderedIds);
         }
 
-        function applySavedColumnOrder() {
-            const savedOrder = localStorage.getItem('redmanaColumnOrder');
-            if (!savedOrder) return;
+        function applyColumnOrder(orderIds) {
+            if (!Array.isArray(orderIds) || !orderIds.length) return false;
+
+            const thMap = new Map();
+            headerRow.find('th[data-column-id]').each(function() {
+                thMap.set($(this).data('column-id').toString(), this);
+            });
+
+            const tdMap = new Map();
+            bodyRow.find('td.issue-status-col[data-id]').each(function() {
+                tdMap.set($(this).data('id').toString(), this);
+            });
+
+            let applied = false;
+            orderIds.forEach(id => {
+                const key = id.toString();
+                const th = thMap.get(key);
+                const td = tdMap.get(key);
+                if (th) {
+                    headerRow.append(th);
+                    applied = true;
+                }
+                if (td) {
+                    bodyRow.append(td);
+                }
+            });
+            reorderStickyColumns(orderIds);
+            return applied;
+        }
+
+        function applySavedColumnOrder(options = {}) {
+            const { silent = false } = options;
+            const orderedIds = getSavedOrder();
+            if (!orderedIds) return;
+            suppressOrderObserver = true;
             try {
-                const orderedIds = JSON.parse(savedOrder);
-                if (!Array.isArray(orderedIds) || !orderedIds.length) return;
-                const thMap = new Map();
-                headerRow.find('th[data-column-id]').each(function() {
-                    thMap.set($(this).data('column-id').toString(), this);
-                });
-
-                const tdMap = new Map();
-                bodyRow.find('td.issue-status-col[data-id]').each(function() {
-                    tdMap.set($(this).data('id').toString(), this);
-                });
-
-                orderedIds.forEach(id => {
-                    const th = thMap.get(id.toString());
-                    const td = tdMap.get(id.toString());
-                    if (th) headerRow.append(th);
-                    if (td) bodyRow.append(td);
-                });
-                reorderStickyColumns(orderedIds);
-                console.log('Redmana: Applied saved order via jQuery UI.');
+                const applied = applyColumnOrder(orderedIds);
+                if (applied && !silent) {
+                    console.log('Redmana: Applied saved order via jQuery UI.');
+                }
             } catch (e) {
                 console.error('Redmana: Failed to apply saved order.', e);
+            } finally {
+                suppressOrderObserver = false;
             }
         }
 
@@ -127,6 +161,38 @@
             }
         });
         console.log("Redmana: jQuery UI Sortable initialized from external file.");
+
+        function scheduleOrderReapply() {
+            if (reapplyScheduled) return;
+            reapplyScheduled = true;
+            requestAnimationFrame(() => {
+                reapplyScheduled = false;
+                if (suppressOrderObserver) return;
+                applySavedColumnOrder({ silent: true });
+            });
+        }
+
+        const headerObserver = new MutationObserver(mutations => {
+            if (suppressOrderObserver) return;
+            const relevant = mutations.some(mutation => mutation.type === 'childList' &&
+                (mutation.addedNodes.length > 0 || mutation.removedNodes.length > 0));
+            if (!relevant) return;
+            scheduleOrderReapply();
+        });
+
+        const mainThead = headerRow.closest('thead');
+        if (mainThead.length) {
+            headerObserver.observe(mainThead.get(0), { childList: true });
+        }
+        const stickyThead = $('table.list.issues-board.sticky > thead');
+        if (stickyThead.length) {
+            headerObserver.observe(stickyThead.get(0), { childList: true });
+        }
+
+        const boardTable = $('table.list.issues-board:not(.sticky)');
+        if (boardTable.length) {
+            headerObserver.observe(boardTable.get(0), { childList: true, subtree: true });
+        }
 
         // Auto-scroll while dragging issue cards near viewport edges
         let isDraggingCard = false;
