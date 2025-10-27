@@ -14,6 +14,15 @@
         let suppressOrderObserver = false;
         let reapplyScheduled = false;
 
+        function arraysEqual(arrA, arrB) {
+            if (!Array.isArray(arrA) || !Array.isArray(arrB)) return false;
+            if (arrA.length !== arrB.length) return false;
+            for (let i = 0; i < arrA.length; i++) {
+                if (arrA[i] !== arrB[i]) return false;
+            }
+            return true;
+        }
+
         function getStickyHeaderRows() {
             return $('table.list.issues-board.sticky > thead > tr');
         }
@@ -25,6 +34,12 @@
 
             stickyRows.each(function() {
                 const row = $(this);
+                const currentOrder = row.find('th[data-column-id]').map(function() {
+                    return $(this).data('column-id').toString();
+                }).get();
+                if (arraysEqual(currentOrder, orderIds)) {
+                    return;
+                }
                 const stickyMap = new Map();
                 row.find('th[data-column-id]').each(function() {
                     stickyMap.set($(this).data('column-id').toString(), this);
@@ -63,6 +78,21 @@
         function applyColumnOrder(orderIds) {
             if (!Array.isArray(orderIds) || !orderIds.length) return false;
 
+            const currentHeaderOrder = headerRow.find('th[data-column-id]').map(function() {
+                return $(this).data('column-id').toString();
+            }).get();
+            const currentBodyOrder = bodyRow.find('td.issue-status-col[data-id]').map(function() {
+                return $(this).data('id').toString();
+            }).get();
+
+            const headerChanged = !arraysEqual(currentHeaderOrder, orderIds);
+            const bodyChanged = !arraysEqual(currentBodyOrder, orderIds);
+
+            if (!headerChanged && !bodyChanged) {
+                reorderStickyColumns(orderIds);
+                return false;
+            }
+
             const thMap = new Map();
             headerRow.find('th[data-column-id]').each(function() {
                 thMap.set($(this).data('column-id').toString(), this);
@@ -74,18 +104,25 @@
             });
 
             let applied = false;
-            orderIds.forEach(id => {
-                const key = id.toString();
-                const th = thMap.get(key);
-                const td = tdMap.get(key);
-                if (th) {
-                    headerRow.append(th);
-                    applied = true;
-                }
-                if (td) {
-                    bodyRow.append(td);
-                }
-            });
+            if (headerChanged) {
+                orderIds.forEach(id => {
+                    const key = id.toString();
+                    const th = thMap.get(key);
+                    if (th) {
+                        headerRow.append(th);
+                        applied = true;
+                    }
+                });
+            }
+            if (bodyChanged) {
+                orderIds.forEach(id => {
+                    const key = id.toString();
+                    const td = tdMap.get(key);
+                    if (td) {
+                        bodyRow.append(td);
+                    }
+                });
+            }
             reorderStickyColumns(orderIds);
             return applied;
         }
@@ -173,9 +210,17 @@
         }
 
         const headerObserver = new MutationObserver(mutations => {
-            if (suppressOrderObserver) return;
-            const relevant = mutations.some(mutation => mutation.type === 'childList' &&
-                (mutation.addedNodes.length > 0 || mutation.removedNodes.length > 0));
+            if (suppressOrderObserver || isDraggingCard) return;
+            const relevant = mutations.some(mutation => {
+                if (mutation.type !== 'childList') return false;
+                if (mutation.addedNodes.length === 0 && mutation.removedNodes.length === 0) return false;
+                const target = mutation.target;
+                if (!(target instanceof Element)) return false;
+                if (target.closest && target.closest('td.issue-status-col')) {
+                    return false;
+                }
+                return true;
+            });
             if (!relevant) return;
             scheduleOrderReapply();
         });
@@ -215,14 +260,25 @@
             const threshold = 80;
             const scrollStep = 30;
             const viewportHeight = window.innerHeight;
+            const maxScrollTop = document.documentElement.scrollHeight - viewportHeight;
+            let didScroll = false;
 
             if (lastPointerY < threshold && window.scrollY > 0) {
                 window.scrollBy(0, -scrollStep);
+                didScroll = true;
             } else if (lastPointerY > viewportHeight - threshold) {
-                window.scrollBy(0, scrollStep);
+                const nextScroll = Math.min(window.scrollY + scrollStep, maxScrollTop);
+                if (nextScroll !== window.scrollY) {
+                    window.scrollTo(0, nextScroll);
+                    didScroll = true;
+                }
             }
 
-            scrollAnimationFrame = requestAnimationFrame(applyAutoScroll);
+            if (didScroll) {
+                scrollAnimationFrame = requestAnimationFrame(applyAutoScroll);
+            } else {
+                scrollAnimationFrame = null;
+            }
         }
 
         function stopAutoScroll() {
@@ -253,5 +309,12 @@
                 updatePointerY(event.touches[0].clientY);
             }
         }, { passive: true });
+
+        ['mouseup', 'touchend', 'touchcancel', 'pointerup', 'pointercancel', 'dragend'].forEach(eventType => {
+            document.addEventListener(eventType, () => {
+                if (!isDraggingCard) return;
+                stopAutoScroll();
+            }, true);
+        });
     });
 })(window.jQuery);

@@ -461,7 +461,7 @@ async function loadIssueIntoDrawer(issueUrl) {
         if (anchor) {
             const target = clonedContent.querySelector(anchor);
             if (target) {
-                target.scrollIntoView({ block: 'start' });
+                scrollDrawerToElement(target);
             }
         }
     } catch (error) {
@@ -485,6 +485,7 @@ function attachDrawerEnhancements(drawerContent, issueUrl) {
     enhanceIssueForms(drawerContent, issueUrl);
     normalizeLinks(drawerContent);
     revealIssueHistory(drawerContent);
+    enableDrawerAnchorNavigation(drawerContent, issueUrl);
 }
 
 function normalizeLinks(drawerContent) {
@@ -515,6 +516,84 @@ function revealIssueHistory(drawerContent) {
         tabs.classList.add('redmana-drawer-tabs');
         tabs.classList.remove('hidden');
         tabs.style.removeProperty('display');
+    });
+}
+
+function scrollDrawerToElement(targetElement, options = {}) {
+    if (!targetElement) return;
+    const { smooth = false } = options;
+    const drawerBody = targetElement.closest('.redmana-drawer-body');
+    const behavior = smooth ? 'smooth' : 'auto';
+
+    if (drawerBody) {
+        const drawerRect = drawerBody.getBoundingClientRect();
+        const targetRect = targetElement.getBoundingClientRect();
+        const nextScrollTop = drawerBody.scrollTop + (targetRect.top - drawerRect.top);
+        drawerBody.scrollTo({ top: nextScrollTop, behavior });
+    } else {
+        targetElement.scrollIntoView({ block: 'start', behavior });
+    }
+}
+
+function enableDrawerAnchorNavigation(drawerContent, issueUrl) {
+    if (!drawerContent) return;
+
+    let baseUrl;
+    try {
+        baseUrl = new URL(issueUrl, window.location.origin);
+    } catch (error) {
+        console.warn('Redmana: Failed to parse issue URL for anchor handling.', error);
+        return;
+    }
+
+    const normalizePathname = pathname => (pathname || '').replace(/\/+$/, '');
+
+    drawerContent.addEventListener('click', event => {
+        if (event.defaultPrevented || event.button !== 0) return;
+        const anchor = event.target.closest('a[href]');
+        if (!anchor) return;
+
+        const rawHref = anchor.getAttribute('href');
+        if (!rawHref) return;
+
+        let targetHash = null;
+
+        if (rawHref.startsWith('#')) {
+            targetHash = rawHref;
+        } else {
+            let resolvedUrl;
+            try {
+                resolvedUrl = new URL(resolveIssueUrl(rawHref));
+            } catch (error) {
+                return;
+            }
+
+            if (normalizePathname(resolvedUrl.pathname) !== normalizePathname(baseUrl.pathname)) {
+                return; // Different issue; let the global handler deal with it.
+            }
+
+            targetHash = resolvedUrl.hash || '';
+        }
+
+        if (!targetHash || targetHash === '#') return;
+
+        const selector = targetHash.startsWith('#') ? targetHash : `#${targetHash}`;
+        const targetElement = drawerContent.querySelector(selector);
+        if (!targetElement) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        try {
+            const updatedUrl = `${baseUrl.origin}${baseUrl.pathname}${baseUrl.search}${selector}`;
+            history.replaceState({ redmanaDrawer: true }, '', updatedUrl);
+            drawerState.currentUrl = updatedUrl;
+            lastKnownUrl = window.location.href;
+        } catch (error) {
+            console.warn('Redmana: Failed to update history for anchor navigation.', error);
+        }
+
+        scrollDrawerToElement(targetElement, { smooth: true });
     });
 }
 
