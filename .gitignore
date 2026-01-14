@@ -1,6 +1,5 @@
 # Tooling artifacts
 node_modules/
 build/
-dist/
 # macOS noise
 .DS_Store
