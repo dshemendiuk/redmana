@@ -63,6 +63,10 @@ $issue-card-padding: 6px;
         transform: translateX(0);
         opacity: 1;
       }
+
+      div#sticky-issue-header.is-visible {
+        display: none;
+      }
     }
 
     .redmana-drawer {

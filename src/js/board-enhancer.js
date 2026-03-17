@@ -6,13 +6,15 @@
 
     $(document).ready(function() {
         const HEADER_ROW_SELECTOR = "table.list.issues-board:not(.sticky) > thead > tr";
-        const headerRow = $(HEADER_ROW_SELECTOR);
-        const bodyRow = $('table.list.issues-board:not(.sticky) > tbody > tr');
+        const BODY_ROW_SELECTOR = "table.list.issues-board:not(.sticky) > tbody > tr";
 
-        if (!headerRow.length || !bodyRow.length) return;
+        function getHeaderRow() { return $(HEADER_ROW_SELECTOR); }
+        function getBodyRow() { return $(BODY_ROW_SELECTOR); }
 
-        let suppressOrderObserver = false;
+        if (!getHeaderRow().length || !getBodyRow().length) return;
+
         let reapplyScheduled = false;
+        const observerTargets = [];
 
         function arraysEqual(arrA, arrB) {
             if (!Array.isArray(arrA) || !Array.isArray(arrB)) return false;
@@ -68,7 +70,7 @@
         }
 
         function saveColumnOrder() {
-            const orderedIds = headerRow.find('th[data-column-id]').map(function() {
+            const orderedIds = getHeaderRow().find('th[data-column-id]').map(function() {
                 return $(this).data('column-id');
             }).get();
             localStorage.setItem('redmanaColumnOrder', JSON.stringify(orderedIds));
@@ -77,6 +79,10 @@
 
         function applyColumnOrder(orderIds) {
             if (!Array.isArray(orderIds) || !orderIds.length) return false;
+
+            const headerRow = getHeaderRow();
+            const bodyRow = getBodyRow();
+            if (!headerRow.length) return false;
 
             const currentHeaderOrder = headerRow.find('th[data-column-id]').map(function() {
                 return $(this).data('column-id').toString();
@@ -127,90 +133,72 @@
             return applied;
         }
 
-        function applySavedColumnOrder(options = {}) {
-            const { silent = false } = options;
-            const orderedIds = getSavedOrder();
-            if (!orderedIds) return;
-            suppressOrderObserver = true;
-            try {
-                const applied = applyColumnOrder(orderedIds);
-                if (applied && !silent) {
-                    console.log('Redmana: Applied saved order via jQuery UI.');
-                }
-            } catch (e) {
-                console.error('Redmana: Failed to apply saved order.', e);
-            } finally {
-                suppressOrderObserver = false;
-            }
-        }
-
-        applySavedColumnOrder();
-
         // Capture column widths on mousedown, before sorting begins
-        headerRow.on('mousedown', 'th', function() {
-            headerRow.find('th').each(function() {
-                $(this).data('original-width', $(this).width());
-            });
-        });
+        function initSortable() {
+            const headerRow = getHeaderRow();
+            if (!headerRow.length) return;
 
-        headerRow.sortable({
-            axis: 'x',
-            placeholder: 'sortable-placeholder',
-            tolerance: 'pointer',
-            helper: 'clone',
-            start: function(event, ui) {
-                // Apply the pre-captured widths
-                ui.placeholder.width(ui.helper.width());
-                headerRow.find('th').each(function() {
-                    $(this).width($(this).data('original-width'));
-                });
-            },
-            stop: function(event, ui) {
-                // Un-freeze column widths and clear data
-                headerRow.find('th').each(function() {
-                    $(this).css('width', '').removeData('original-width');
-                });
-            },
-            update: function(event, ui) {
-                // Get the desired order from the headers, which are now correct in the DOM
-                const newOrderIds = $(this).find('th[data-column-id]').map(function() {
-                    return $(this).data('column-id').toString();
-                }).get();
-
-                // Create a map of the body columns by their data-id
-                const bodyColumnsMap = new Map();
-                bodyRow.find('td.issue-status-col[data-id]').each(function() {
-                    bodyColumnsMap.set($(this).data('id').toString(), this);
-                });
-
-                // Re-append the body columns in the new correct order
-                newOrderIds.forEach(id => {
-                    const td = bodyColumnsMap.get(id);
-                    if (td) {
-                        bodyRow.append(td);
-                    }
-                });
-
-                reorderStickyColumns(newOrderIds);
-
-                // Now that the DOM is correct, save the order
-                saveColumnOrder();
+            // Destroy existing sortable if present to avoid double-binding
+            if (headerRow.data('ui-sortable') || headerRow.data('sortable')) {
+                headerRow.sortable('destroy');
             }
-        });
-        console.log("Redmana: jQuery UI Sortable initialized from external file.");
 
-        function scheduleOrderReapply() {
-            if (reapplyScheduled) return;
-            reapplyScheduled = true;
-            requestAnimationFrame(() => {
-                reapplyScheduled = false;
-                if (suppressOrderObserver) return;
-                applySavedColumnOrder({ silent: true });
+            headerRow.off('mousedown.redmana');
+            headerRow.on('mousedown.redmana', 'th', function() {
+                getHeaderRow().find('th').each(function() {
+                    $(this).data('original-width', $(this).width());
+                });
+            });
+
+            headerRow.sortable({
+                axis: 'x',
+                placeholder: 'sortable-placeholder',
+                tolerance: 'pointer',
+                helper: 'clone',
+                start: function(event, ui) {
+                    // Apply the pre-captured widths
+                    ui.placeholder.width(ui.helper.width());
+                    $(this).find('th').each(function() {
+                        $(this).width($(this).data('original-width'));
+                    });
+                },
+                stop: function(event, ui) {
+                    // Un-freeze column widths and clear data
+                    $(this).find('th').each(function() {
+                        $(this).css('width', '').removeData('original-width');
+                    });
+                },
+                update: function(event, ui) {
+                    // Get the desired order from the headers, which are now correct in the DOM
+                    const newOrderIds = $(this).find('th[data-column-id]').map(function() {
+                        return $(this).data('column-id').toString();
+                    }).get();
+
+                    // Create a map of the body columns by their data-id
+                    const bodyRow = getBodyRow();
+                    const bodyColumnsMap = new Map();
+                    bodyRow.find('td.issue-status-col[data-id]').each(function() {
+                        bodyColumnsMap.set($(this).data('id').toString(), this);
+                    });
+
+                    // Re-append the body columns in the new correct order
+                    newOrderIds.forEach(id => {
+                        const td = bodyColumnsMap.get(id);
+                        if (td) {
+                            bodyRow.append(td);
+                        }
+                    });
+
+                    reorderStickyColumns(newOrderIds);
+
+                    // Now that the DOM is correct, save the order
+                    saveColumnOrder();
+                }
             });
         }
 
         const headerObserver = new MutationObserver(mutations => {
-            if (suppressOrderObserver || isDraggingCard) return;
+            if (isDraggingCard) return;
             const relevant = mutations.some(mutation => {
                 if (mutation.type !== 'childList') return false;
                 if (mutation.addedNodes.length === 0 && mutation.removedNodes.length === 0) return false;
@@ -225,19 +213,78 @@
             scheduleOrderReapply();
         });
 
-        const mainThead = headerRow.closest('thead');
-        if (mainThead.length) {
-            headerObserver.observe(mainThead.get(0), { childList: true });
-        }
-        const stickyThead = $('table.list.issues-board.sticky > thead');
-        if (stickyThead.length) {
-            headerObserver.observe(stickyThead.get(0), { childList: true });
+        function disconnectOrderObserver() {
+            headerObserver.disconnect();
         }
 
-        const boardTable = $('table.list.issues-board:not(.sticky)');
-        if (boardTable.length) {
-            headerObserver.observe(boardTable.get(0), { childList: true, subtree: true });
+        function reconnectOrderObserver() {
+            observerTargets.forEach(({ target, options }) => {
+                headerObserver.observe(target, options);
+            });
         }
+
+        function setupObserverTargets() {
+            headerObserver.disconnect();
+            observerTargets.length = 0;
+
+            const mainThead = getHeaderRow().closest('thead');
+            if (mainThead.length) {
+                const opts = { childList: true };
+                headerObserver.observe(mainThead.get(0), opts);
+                observerTargets.push({ target: mainThead.get(0), options: opts });
+            }
+            const stickyThead = $('table.list.issues-board.sticky > thead');
+            if (stickyThead.length) {
+                const opts = { childList: true };
+                headerObserver.observe(stickyThead.get(0), opts);
+                observerTargets.push({ target: stickyThead.get(0), options: opts });
+            }
+
+            const boardTable = $('table.list.issues-board:not(.sticky)');
+            if (boardTable.length) {
+                const opts = { childList: true, subtree: true };
+                headerObserver.observe(boardTable.get(0), opts);
+                observerTargets.push({ target: boardTable.get(0), options: opts });
+            }
+        }
+
+        function applySavedColumnOrder(options = {}) {
+            const { silent = false } = options;
+            const orderedIds = getSavedOrder();
+            if (!orderedIds) return;
+            disconnectOrderObserver();
+            try {
+                const applied = applyColumnOrder(orderedIds);
+                if (applied) {
+                    // DOM elements may have been replaced by Redmine's AJAX;
+                    // re-bind sortable and observers to current elements.
+                    initSortable();
+                    setupObserverTargets();
+                    if (!silent) {
+                        console.log('Redmana: Applied saved order via jQuery UI.');
+                    }
+                    return;
+                }
+            } catch (e) {
+                console.error('Redmana: Failed to apply saved order.', e);
+            }
+            reconnectOrderObserver();
+        }
+
+        function scheduleOrderReapply() {
+            if (reapplyScheduled) return;
+            reapplyScheduled = true;
+            requestAnimationFrame(() => {
+                reapplyScheduled = false;
+                applySavedColumnOrder({ silent: true });
+            });
+        }
+
+        // Initial setup
+        applySavedColumnOrder();
+        initSortable();
+        setupObserverTargets();
+        console.log("Redmana: jQuery UI Sortable initialized from external file.");
 
         // Auto-scroll while dragging issue cards near viewport edges
         let isDraggingCard = false;
