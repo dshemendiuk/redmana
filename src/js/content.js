@@ -491,7 +491,7 @@ function attachDrawerEnhancements(drawerContent, issueUrl) {
 function normalizeLinks(drawerContent) {
     drawerContent.querySelectorAll('a[href]').forEach(link => {
         const href = link.getAttribute('href');
-        if (!href || href.startsWith('#')) return;
+        if (!href || href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
 
         link.href = resolveIssueUrl(href);
     });

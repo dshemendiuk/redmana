@@ -14,6 +14,7 @@
         if (!getHeaderRow().length || !getBodyRow().length) return;
 
         let reapplyScheduled = false;
+        let isDraggingColumn = false;
         const observerTargets = [];
 
         function arraysEqual(arrA, arrB) {
@@ -156,6 +157,7 @@
                 tolerance: 'pointer',
                 helper: 'clone',
                 start: function(event, ui) {
+                    isDraggingColumn = true;
                     // Apply the pre-captured widths
                     ui.placeholder.width(ui.helper.width());
                     $(this).find('th').each(function() {
@@ -163,6 +165,7 @@
                     });
                 },
                 stop: function(event, ui) {
+                    isDraggingColumn = false;
                     // Un-freeze column widths and clear data
                     $(this).find('th').each(function() {
                         $(this).css('width', '').removeData('original-width');
@@ -198,7 +201,7 @@
         }
 
         const headerObserver = new MutationObserver(mutations => {
-            if (isDraggingCard) return;
+            if (isDraggingCard || isDraggingColumn) return;
             const relevant = mutations.some(mutation => {
                 if (mutation.type !== 'childList') return false;
                 if (mutation.addedNodes.length === 0 && mutation.removedNodes.length === 0) return false;
