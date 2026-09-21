@@ -124,12 +124,61 @@ if (isRedmine && window.location.pathname.includes('/agile/board')) {
 
 // --- Feature: Image Lightbox ---
 
+// Third-party Redmine lightbox plugins (e.g. redmine_lightbox3 / fancybox) bind their
+// own handlers to attachment links. When such a plugin is installed we must stay out of
+// the way, otherwise both overlays open stacked on top of each other.
+const EXTERNAL_LIGHTBOX_SCRIPT_SELECTOR = [
+    'script[src*="redmine_lightbox"]',
+    'script[src*="fancybox"]',
+    'script[src*="colorbox"]',
+    'script[src*="magnific"]',
+    'script[src*="photoswipe"]'
+].join(', ');
+
+// Overlay roots the known plugins inject when they open.
+const EXTERNAL_LIGHTBOX_OVERLAY_SELECTOR = [
+    '.fancybox-container',
+    '.fancybox-overlay',
+    '.lb-outerContainer',
+    '#colorbox',
+    '.mfp-wrap',
+    '.pswp--open'
+].join(', ');
+
+let externalLightboxPresent = false;
+
+function detectExternalLightbox() {
+    return !!document.querySelector(EXTERNAL_LIGHTBOX_SCRIPT_SELECTOR);
+}
+
+// True when a third-party lightbox has already taken over this particular click.
+// On a regular issue page the plugin binds directly to the anchor, so its handler runs
+// (and calls preventDefault) before this delegated one on <body>. Links rendered later -
+// e.g. inside the Redmana drawer - never get that binding, so our lightbox still applies.
+function externalLightboxHandledClick(event) {
+    if (!externalLightboxPresent) {
+        return false;
+    }
+
+    if (event.defaultPrevented) {
+        return true;
+    }
+
+    return !!document.querySelector(EXTERNAL_LIGHTBOX_OVERLAY_SELECTOR);
+}
+
 function initLightbox() {
+    externalLightboxPresent = detectExternalLightbox();
+
     document.body.addEventListener('click', function(event) {
         const thumbnailLink = event.target.closest('div.thumbnails a');
 
         if (!thumbnailLink) {
             return; // Click was not on a thumbnail
+        }
+
+        if (externalLightboxHandledClick(event)) {
+            return; // A third-party lightbox plugin is showing this image already
         }
 
         const imgTag = thumbnailLink.querySelector('img');
@@ -185,7 +234,9 @@ function initLightbox() {
 
         document.body.appendChild(overlay);
     });
-    console.log("Redmana: Lightbox initialized.");
+    console.log(externalLightboxPresent
+        ? "Redmana: Lightbox initialized (external lightbox plugin detected, deferring on pages it handles)."
+        : "Redmana: Lightbox initialized.");
 }
 
 // Initialize the lightbox feature on all pages
