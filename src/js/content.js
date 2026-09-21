@@ -251,8 +251,8 @@ const drawerState = {
     baseUrl: null,
     currentUrl: null,
     closePending: false,
-    activeController: null,
     activeRequestToken: null,
+    renderedSignature: null,
     selectedElement: null
 };
 
@@ -413,16 +413,14 @@ function closeDrawerInternal() {
     drawerState.isOpen = false;
     drawerState.baseUrl = null;
     drawerState.currentUrl = null;
+    drawerState.renderedSignature = null;
     drawerState.closePending = false;
     lastKnownUrl = window.location.href;
 
     clearHighlightedIssue();
 
-    if (drawerState.activeController) {
-        drawerState.activeController.abort();
-        drawerState.activeController = null;
-    }
-
+    // Any in-flight request is left to finish and populate the cache; dropping the
+    // token is what stops it from rendering into a drawer the user already closed.
     drawerState.activeRequestToken = null;
 
     setTimeout(() => {
@@ -432,47 +430,200 @@ function closeDrawerInternal() {
     }, 200);
 }
 
-async function loadIssueIntoDrawer(issueUrl) {
-    const elements = ensureDrawerElements();
+// --- Drawer prefetching ---
+// Rendering an issue page server-side takes anywhere from ~0.5s to several seconds,
+// and that TTFB is the whole cost of opening the drawer - parsing and injecting the
+// HTML is single-digit milliseconds. So the only real lever is to start the request
+// before the click lands, and to not repeat it when the same issue is reopened.
+
+// With background revalidation in place the cache can hold entries far longer than a
+// plain TTL would allow: a stale copy is only ever shown for the moment it takes the
+// refresh to come back.
+const ISSUE_HTML_CACHE_TTL_MS = 300000;
+// Below this age a copy is treated as current - it spares a pointless second render
+// when a hover-prefetch is consumed by the click a moment later.
+const REVALIDATE_AFTER_MS = 5000;
+const PREFETCH_HOVER_DELAY_MS = 150;
+const MAX_CACHED_ISSUES = 12;
+// Rendering an issue costs the server real time, and a board is wall-to-wall issue
+// links. Speculative requests stay capped so sweeping the mouse over a board cannot
+// turn into a burst of expensive renders.
+const MAX_INFLIGHT_PREFETCHES = 2;
+
+// requestUrl -> { promise, html, fetchedAt }
+const issueHtmlCache = new Map();
+let prefetchHoverTimer = null;
+let prefetchHoverUrl = null;
+let inflightPrefetches = 0;
+
+function issueRequestUrl(issueUrl) {
+    const url = new URL(issueUrl, window.location.origin);
+    return `${url.origin}${url.pathname}${url.search}`;
+}
+
+function pruneIssueHtmlCache() {
+    const now = Date.now();
+    issueHtmlCache.forEach((entry, key) => {
+        if (entry.html !== undefined && now - entry.fetchedAt > ISSUE_HTML_CACHE_TTL_MS) {
+            issueHtmlCache.delete(key);
+        }
+    });
+
+    // Keep the map bounded; Map iterates in insertion order, so the oldest go first.
+    while (issueHtmlCache.size > MAX_CACHED_ISSUES) {
+        const oldestKey = issueHtmlCache.keys().next().value;
+        issueHtmlCache.delete(oldestKey);
+    }
+}
+
+// Single-flight fetch: a hover-triggered prefetch and the click that follows it share
+// one request instead of racing two identical ones against a slow server.
+function fetchIssueHtml(requestUrl, { force = false } = {}) {
+    pruneIssueHtmlCache();
+
+    if (force) {
+        issueHtmlCache.delete(requestUrl);
+    } else {
+        const cached = issueHtmlCache.get(requestUrl);
+        if (cached) {
+            return cached.promise;
+        }
+    }
+
+    const entry = { fetchedAt: Date.now(), html: undefined, finalUrl: requestUrl };
+    entry.promise = fetch(requestUrl, { credentials: 'include' })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Response not OK (${response.status})`);
+            }
+            entry.finalUrl = response.url || requestUrl;
+            return response.text();
+        })
+        .then(html => {
+            entry.html = html;
+            entry.fetchedAt = Date.now();
+            return { html, finalUrl: entry.finalUrl };
+        })
+        .catch(error => {
+            // Never cache a failure - the next attempt should hit the server again.
+            issueHtmlCache.delete(requestUrl);
+            throw error;
+        });
+
+    issueHtmlCache.set(requestUrl, entry);
+    return entry.promise;
+}
+
+function invalidateIssueHtml(issueUrl) {
+    try {
+        issueHtmlCache.delete(issueRequestUrl(issueUrl));
+    } catch (error) {
+        // Ignore unparsable URLs - nothing to invalidate.
+    }
+}
+
+function prefetchIssue(issueUrl) {
+    let requestUrl;
+    try {
+        requestUrl = issueRequestUrl(issueUrl);
+    } catch (error) {
+        return;
+    }
+
+    if (issueHtmlCache.has(requestUrl) || inflightPrefetches >= MAX_INFLIGHT_PREFETCHES) {
+        return;
+    }
+
+    inflightPrefetches += 1;
+    fetchIssueHtml(requestUrl)
+        .catch(() => {
+            // A failed prefetch is not worth reporting; the click will retry and surface it.
+        })
+        .finally(() => {
+            inflightPrefetches -= 1;
+        });
+}
+
+function cancelPrefetchHover() {
+    if (prefetchHoverTimer !== null) {
+        clearTimeout(prefetchHoverTimer);
+        prefetchHoverTimer = null;
+    }
+    prefetchHoverUrl = null;
+}
+
+// Warm the cache once the pointer has settled on a link, so the server has a head start
+// by the time the click arrives. The dwell delay keeps a cursor sweeping across an issue
+// list from firing a request per row.
+function handleIssuePrefetchHover(event) {
+    const anchor = event.target.closest && event.target.closest('a[href]');
+    if (!anchor || !shouldHandleIssueLink(anchor)) {
+        cancelPrefetchHover();
+        return;
+    }
+
+    const issueUrl = resolveIssueUrl(anchor.getAttribute('href'));
+    if (issueUrl === prefetchHoverUrl) {
+        return;
+    }
+
+    cancelPrefetchHover();
+    prefetchHoverUrl = issueUrl;
+    prefetchHoverTimer = setTimeout(() => {
+        prefetchHoverTimer = null;
+        prefetchIssue(issueUrl);
+    }, PREFETCH_HOVER_DELAY_MS);
+}
+
+// Fallback for pointers that never hover (touch, keyboard-driven clicks): mousedown
+// still beats the click event by a few dozen milliseconds.
+function handleIssuePrefetchIntent(event) {
+    if (event.button !== undefined && event.button !== 0) return;
+    // A modified click opens a real tab and never reaches the drawer, so prefetching
+    // for it would just burn a server render.
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const anchor = event.target.closest && event.target.closest('a[href]');
+    if (!anchor || !shouldHandleIssueLink(anchor)) return;
+
+    cancelPrefetchHover();
+    prefetchIssue(resolveIssueUrl(anchor.getAttribute('href')));
+}
+
+async function loadIssueIntoDrawer(issueUrl, { force = false } = {}) {
+    ensureDrawerElements();
     const urlObj = new URL(issueUrl, window.location.origin);
     const requestUrl = `${urlObj.origin}${urlObj.pathname}${urlObj.search}`;
     const anchor = urlObj.hash;
 
-    if (drawerState.activeController) {
-        drawerState.activeController.abort();
-    }
-    const controller = new AbortController();
-    drawerState.activeController = controller;
     const requestToken = Symbol('drawerRequest');
     drawerState.activeRequestToken = requestToken;
 
-    setDrawerTitle('Loading...', issueUrl);
-    showDrawerLoading();
+    const cached = !force && issueHtmlCache.get(requestUrl);
+    const isWarm = !!(cached && cached.html !== undefined);
+    const shouldRevalidate = isWarm && (Date.now() - cached.fetchedAt) > REVALIDATE_AFTER_MS;
+
+    // A warm cache hit renders synchronously enough that a loading state would just flash.
+    if (!isWarm) {
+        setDrawerTitle('Loading...', issueUrl);
+        showDrawerLoading();
+    }
 
     let effectiveIssueUrl = issueUrl;
 
     try {
-        const response = await fetch(requestUrl, {
-            credentials: 'include',
-            signal: controller.signal
-        });
+        const { html, finalUrl } = await fetchIssueHtml(requestUrl, { force });
 
-        if (!response.ok) {
-            throw new Error(`Response not OK (${response.status})`);
+        // The drawer moved on (another issue clicked, or it was closed) while we waited.
+        if (drawerState.activeRequestToken !== requestToken) {
+            return;
         }
-
-        const html = await response.text();
 
         if (!html || !html.trim()) {
             navigateToIssuePage(issueUrl, 'Empty issue response.');
             return;
         }
 
-        if (drawerState.activeRequestToken !== requestToken) {
-            return;
-        }
-
-        const finalUrlBase = resolveIssueUrl(response.url || requestUrl);
+        const finalUrlBase = resolveIssueUrl(finalUrl || requestUrl);
         effectiveIssueUrl = anchor ? `${finalUrlBase}${anchor}` : finalUrlBase;
         drawerState.currentUrl = effectiveIssueUrl;
 
@@ -485,51 +636,163 @@ async function loadIssueIntoDrawer(issueUrl) {
             }
         }
 
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
-        const content = doc.querySelector('#content');
+        const content = parseIssueContent(html);
 
         if (!content) {
             navigateToIssuePage(issueUrl, 'Issue content container missing.');
             return;
         }
 
-        const clonedContent = content.cloneNode(true);
-        clonedContent.id = 'redmana-drawer-content';
-        clonedContent.querySelectorAll('script, link[rel="stylesheet"]').forEach(el => el.remove());
+        renderIssueContent(content, effectiveIssueUrl, anchor);
 
-        const heading = clonedContent.querySelector('h2');
-        const titleText = heading ? heading.textContent.trim() : 'Task';
-        setDrawerTitle(titleText, effectiveIssueUrl);
-
-        elements.body.innerHTML = '';
-        elements.body.appendChild(clonedContent);
-        elements.body.scrollTop = 0;
-
-        attachDrawerEnhancements(clonedContent, effectiveIssueUrl);
-        highlightIssueContext(effectiveIssueUrl);
-
-        if (anchor) {
-            const target = clonedContent.querySelector(anchor);
-            if (target) {
-                scrollDrawerToElement(target);
-            }
+        if (shouldRevalidate) {
+            // The cached copy is on screen instantly; now check whether the issue moved
+            // on behind our back (a new comment, an edited description) and quietly
+            // catch up if it did.
+            revalidateDrawerIssue(requestUrl, requestToken, effectiveIssueUrl, anchor);
         }
     } catch (error) {
-        if (error.name === 'AbortError') {
+        if (drawerState.activeRequestToken !== requestToken) {
             return;
         }
         console.error('Redmana: Failed to load issue into drawer.', error);
         navigateToIssuePage(issueUrl, error && error.message ? error.message : error);
         return;
     } finally {
-        if (drawerState.activeController === controller) {
-            drawerState.activeController = null;
-        }
         if (drawerState.activeRequestToken === requestToken) {
             drawerState.activeRequestToken = null;
         }
     }
+}
+
+function parseIssueContent(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    return doc.querySelector('#content');
+}
+
+function renderIssueContent(content, effectiveIssueUrl, anchor, { preserveScroll = false } = {}) {
+    const elements = ensureDrawerElements();
+    const previousScroll = preserveScroll ? elements.body.scrollTop : 0;
+
+    const clonedContent = content.cloneNode(true);
+    clonedContent.id = 'redmana-drawer-content';
+    clonedContent.querySelectorAll('script, link[rel="stylesheet"]').forEach(el => el.remove());
+
+    const heading = clonedContent.querySelector('h2');
+    const titleText = heading ? heading.textContent.trim() : 'Task';
+    setDrawerTitle(titleText, effectiveIssueUrl);
+
+    elements.body.innerHTML = '';
+    elements.body.appendChild(clonedContent);
+    elements.body.scrollTop = previousScroll;
+
+    drawerState.renderedSignature = issueContentSignature(content);
+
+    attachDrawerEnhancements(clonedContent, effectiveIssueUrl);
+    highlightIssueContext(effectiveIssueUrl);
+
+    if (anchor && !preserveScroll) {
+        const target = clonedContent.querySelector(anchor);
+        if (target) {
+            scrollDrawerToElement(target);
+        }
+    }
+}
+
+// Rails re-randomises the CSRF token and form names on every request, so raw markup
+// never compares equal. Stripping just those makes an unchanged issue compare identical.
+function issueContentSignature(content) {
+    const copy = content.cloneNode(true);
+    copy.querySelectorAll('input[name="authenticity_token"]').forEach(el => el.setAttribute('value', ''));
+    copy.querySelectorAll('form[name]').forEach(el => el.removeAttribute('name'));
+    copy.querySelectorAll('[id^="form-"]').forEach(el => el.removeAttribute('id'));
+    return copy.innerHTML;
+}
+
+// Anything the user typed, ticked or picked since the drawer rendered. A background
+// refresh must never throw this away - a half-written comment is worth more than
+// being a few seconds fresher.
+function drawerHasUnsavedInput() {
+    const elements = ensureDrawerElements();
+    const root = elements.body;
+
+    if (root.contains(document.activeElement) && document.activeElement !== root) {
+        const active = document.activeElement;
+        if (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) {
+            return true;
+        }
+    }
+
+    const fields = root.querySelectorAll('input, textarea, select');
+    for (const field of fields) {
+        if (field.type === 'hidden' || field.disabled) continue;
+
+        if (field.tagName === 'SELECT') {
+            // Compare by value, not per-option flags: the "Latest" optgroup we inject
+            // duplicates an existing option, so the selection legitimately sits on a
+            // clone whose defaultSelected is false.
+            const selected = Array.from(field.selectedOptions).map(option => option.value).sort();
+            const original = Array.from(field.options).filter(option => option.defaultSelected).map(option => option.value).sort();
+
+            if (!original.length && !field.multiple) {
+                // No server-side selection means the browser picked the first option.
+                const fallback = field.options[0] ? field.options[0].value : '';
+                if (field.value !== fallback) return true;
+                continue;
+            }
+
+            if (selected.join('\u0000') !== original.join('\u0000')) return true;
+            continue;
+        }
+
+        if (field.type === 'checkbox' || field.type === 'radio') {
+            if (field.checked !== field.defaultChecked) return true;
+            continue;
+        }
+
+        if (field.type === 'file') {
+            if (field.files && field.files.length) return true;
+            continue;
+        }
+
+        if (field.value !== field.defaultValue) return true;
+    }
+
+    return !!root.querySelector('[contenteditable="true"]:not(:empty)');
+}
+
+// Fired only after a cache hit: re-request in the background and swap in the result
+// if - and only if - the issue actually changed and the user has nothing in progress.
+async function revalidateDrawerIssue(requestUrl, requestToken, effectiveIssueUrl, anchor) {
+    let fresh;
+    try {
+        fresh = await fetchIssueHtml(requestUrl, { force: true });
+    } catch (error) {
+        console.warn('Redmana: Background refresh failed; keeping the cached view.', error);
+        return;
+    }
+
+    // The drawer moved on to another issue, or was closed, while we were refreshing.
+    if (drawerState.activeRequestToken !== null && drawerState.activeRequestToken !== requestToken) {
+        return;
+    }
+    if (!drawerState.isOpen || drawerState.currentUrl !== effectiveIssueUrl) {
+        return;
+    }
+
+    const content = parseIssueContent(fresh.html);
+    if (!content) return;
+
+    if (issueContentSignature(content) === drawerState.renderedSignature) {
+        return; // Nothing changed - leave the DOM alone.
+    }
+
+    if (drawerHasUnsavedInput()) {
+        console.log('Redmana: Issue changed upstream, but the drawer has unsaved input - not refreshing.');
+        return;
+    }
+
+    renderIssueContent(content, effectiveIssueUrl, anchor, { preserveScroll: true });
 }
 
 function attachDrawerEnhancements(drawerContent, issueUrl) {
@@ -699,7 +962,8 @@ async function submitIssueForm(form, issueUrl, statusMessage) {
         const redirectLocation = response.headers ? response.headers.get('Location') : null;
         const nextUrl = redirectLocation ? resolveIssueUrl(redirectLocation) : issueUrl;
 
-        await loadIssueIntoDrawer(nextUrl);
+        invalidateIssueHtml(nextUrl);
+        await loadIssueIntoDrawer(nextUrl, { force: true });
         showTemporaryMessage('Task updated.', 'success');
     } catch (error) {
         console.error('Redmana: Failed to submit issue form.', error);
@@ -1101,6 +1365,9 @@ function initIssueDrawer() {
     window[DRAWER_INIT_FLAG] = true;
 
     document.addEventListener('click', handleDocumentClick, true);
+    document.addEventListener('mouseover', handleIssuePrefetchHover, true);
+    document.addEventListener('mouseout', cancelPrefetchHover, true);
+    document.addEventListener('mousedown', handleIssuePrefetchIntent, true);
     window.addEventListener('popstate', handlePopState);
     document.addEventListener('keydown', handleKeyDown);
 }
