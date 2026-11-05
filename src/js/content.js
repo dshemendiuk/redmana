@@ -250,7 +250,6 @@ const drawerState = {
     isOpen: false,
     baseUrl: null,
     currentUrl: null,
-    closePending: false,
     activeRequestToken: null,
     renderedSignature: null,
     selectedElement: null
@@ -258,6 +257,90 @@ const drawerState = {
 
 let drawerElements = null;
 let assigneeObserver = null;
+
+// The issue drawer and the user overview drawer (user-drawer.js) can be open at the same
+// time - an issue opened from someone's overview, or a person opened from an issue. The
+// one opened last sits on top.
+const DRAWER_BASE_Z_INDEX = 2147483000;
+
+function bringDrawerToFront(container) {
+    document.querySelectorAll('.redmana-drawer-container').forEach(element => {
+        element.style.zIndex = String(element === container ? DRAWER_BASE_Z_INDEX + 1 : DRAWER_BASE_Z_INDEX);
+    });
+}
+
+// --- Drawer history ---
+// Every open drawer owns one history entry showing its real URL, so the address bar
+// matches what is on screen and Back closes drawers top-down. Layer names, bottom to top.
+const drawerLayers = [];
+// name -> closes that drawer's UI without touching history. user-drawer.js adds 'user'.
+const drawerLayerClosers = {};
+let drawerHistoryPending = false;
+let pendingDrawerClaim = null;
+
+function topDrawerLayer() {
+    return drawerLayers.length ? drawerLayers[drawerLayers.length - 1] : null;
+}
+
+// Points the address bar at `url` for drawer `name` and then runs `onReady`: a new entry
+// when the drawer is not open yet, a replaced one when it is already on top. When it is
+// open but covered, the drawer above is closed first - through history, so Back keeps
+// matching what is on screen.
+function claimDrawerHistory(name, url, onReady) {
+    const top = topDrawerLayer();
+    try {
+        if (top === name) {
+            history.replaceState({ redmanaDrawer: true }, '', url);
+        } else if (drawerLayers.includes(name)) {
+            pendingDrawerClaim = () => claimDrawerHistory(name, url, onReady);
+            if (!drawerHistoryPending) {
+                drawerHistoryPending = true;
+                history.back();
+            }
+            return;
+        } else {
+            history.pushState({ redmanaDrawer: true }, '', url);
+            drawerLayers.push(name);
+        }
+    } catch (error) {
+        console.warn('Redmana: Failed to update history for the drawer.', error);
+    }
+    lastKnownUrl = window.location.href;
+    onReady();
+}
+
+function replaceDrawerUrl(name, url) {
+    if (topDrawerLayer() !== name) return;
+    try {
+        history.replaceState({ redmanaDrawer: true }, '', url);
+        lastKnownUrl = window.location.href;
+    } catch (error) {
+        console.warn('Redmana: Failed to sync history state.', error);
+    }
+}
+
+function requestDrawerLayerClose(name) {
+    if (topDrawerLayer() === name) {
+        if (!drawerHistoryPending) {
+            drawerHistoryPending = true;
+            history.back();
+        }
+        return;
+    }
+    // Not reachable through the UI (a covered drawer has no usable controls), but stay
+    // consistent if it happens: close it in place and leave its history entry behind.
+    const index = drawerLayers.lastIndexOf(name);
+    if (index !== -1) {
+        drawerLayers.splice(index, 1);
+        drawerLayerClosers[name]();
+    }
+}
+
+// Called with the layer already removed when history drove the close; removes it otherwise.
+function forgetDrawerLayer(name) {
+    const index = drawerLayers.lastIndexOf(name);
+    if (index !== -1) drawerLayers.splice(index, 1);
+}
 
 function resolveIssueUrl(rawHref) {
     try {
@@ -350,7 +433,7 @@ function ensureDrawerElements() {
 
     document.body.appendChild(container);
 
-    closeButton.addEventListener('click', requestDrawerClose);
+    closeButton.addEventListener('click', () => requestDrawerLayerClose('issue'));
 
     drawerElements = {
         container,
@@ -394,16 +477,9 @@ function showDrawerError(message) {
     elements.body.appendChild(alert);
 }
 
-function requestDrawerClose() {
-    if (!drawerState.isOpen || drawerState.closePending) {
-        return;
-    }
-    drawerState.closePending = true;
-    history.back();
-}
-
 function closeDrawerInternal() {
     if (!drawerState.isOpen) return;
+    forgetDrawerLayer('issue');
     const elements = ensureDrawerElements();
     elements.container.classList.remove('is-open');
     elements.drawer.setAttribute('aria-hidden', 'true');
@@ -414,7 +490,6 @@ function closeDrawerInternal() {
     drawerState.baseUrl = null;
     drawerState.currentUrl = null;
     drawerState.renderedSignature = null;
-    drawerState.closePending = false;
     lastKnownUrl = window.location.href;
 
     clearHighlightedIssue();
@@ -628,12 +703,7 @@ async function loadIssueIntoDrawer(issueUrl, { force = false } = {}) {
         drawerState.currentUrl = effectiveIssueUrl;
 
         if (drawerState.isOpen) {
-            try {
-                history.replaceState({ redmanaDrawer: true }, '', effectiveIssueUrl);
-                lastKnownUrl = window.location.href;
-            } catch (error) {
-                console.warn('Redmana: Failed to sync history state.', error);
-            }
+            replaceDrawerUrl('issue', effectiveIssueUrl);
         }
 
         const content = parseIssueContent(html);
@@ -898,14 +968,9 @@ function enableDrawerAnchorNavigation(drawerContent, issueUrl) {
         event.preventDefault();
         event.stopPropagation();
 
-        try {
-            const updatedUrl = `${baseUrl.origin}${baseUrl.pathname}${baseUrl.search}${selector}`;
-            history.replaceState({ redmanaDrawer: true }, '', updatedUrl);
-            drawerState.currentUrl = updatedUrl;
-            lastKnownUrl = window.location.href;
-        } catch (error) {
-            console.warn('Redmana: Failed to update history for anchor navigation.', error);
-        }
+        const updatedUrl = `${baseUrl.origin}${baseUrl.pathname}${baseUrl.search}${selector}`;
+        replaceDrawerUrl('issue', updatedUrl);
+        drawerState.currentUrl = updatedUrl;
 
         scrollDrawerToElement(targetElement, { smooth: true });
     });
@@ -1090,36 +1155,25 @@ function openIssueDrawer(issueUrl, options = {}) {
     const elements = ensureDrawerElements();
 
     const absoluteUrl = resolveIssueUrl(issueUrl);
-    highlightIssueContext(absoluteUrl, options.triggerElement || null);
-
     if (!drawerState.isOpen) {
         drawerState.baseUrl = window.location.href;
-        try {
-            history.pushState({ redmanaDrawer: true }, '', absoluteUrl);
-            lastKnownUrl = window.location.href;
-        } catch (error) {
-            console.warn('Redmana: Failed to push history state.', error);
-        }
-    } else {
-        try {
-            history.replaceState({ redmanaDrawer: true }, '', absoluteUrl);
-            lastKnownUrl = window.location.href;
-        } catch (error) {
-            console.warn('Redmana: Failed to replace history state.', error);
-        }
     }
 
-    drawerState.isOpen = true;
-    drawerState.currentUrl = absoluteUrl;
-    drawerState.closePending = false;
+    claimDrawerHistory('issue', absoluteUrl, () => {
+        highlightIssueContext(absoluteUrl, options.triggerElement || null);
 
-    elements.container.classList.add('is-open');
-    elements.drawer.setAttribute('aria-hidden', 'false');
-    if (document.body) {
-        document.body.classList.add(BODY_DRAWER_CLASS);
-    }
+        drawerState.isOpen = true;
+        drawerState.currentUrl = absoluteUrl;
 
-    loadIssueIntoDrawer(absoluteUrl);
+        bringDrawerToFront(elements.container);
+        elements.container.classList.add('is-open');
+        elements.drawer.setAttribute('aria-hidden', 'false');
+        if (document.body) {
+            document.body.classList.add(BODY_DRAWER_CLASS);
+        }
+
+        loadIssueIntoDrawer(absoluteUrl);
+    });
 }
 
 function handleDocumentClick(event) {
@@ -1139,12 +1193,20 @@ function handleDocumentClick(event) {
 
 function handlePopState(event) {
     const currentUrl = window.location.href;
+    drawerHistoryPending = false;
 
-    if (drawerState.isOpen) {
-        closeDrawerInternal();
+    // Back (or a drawer's own close) leaves the top drawer's history entry: close that drawer.
+    const layer = drawerLayers.pop();
+    if (layer) {
+        drawerLayerClosers[layer]();
         lastKnownUrl = window.location.href;
+
+        const claim = pendingDrawerClaim;
+        pendingDrawerClaim = null;
+        if (claim) claim();
         return;
     }
+    pendingDrawerClaim = null;
 
     const state = event && event.state;
     const hasDrawerFlag = !!(state && state.redmanaDrawer === true);
@@ -1160,8 +1222,9 @@ function handlePopState(event) {
 }
 
 function handleKeyDown(event) {
-    if (event.key === 'Escape' && drawerState.isOpen) {
-        requestDrawerClose();
+    const top = topDrawerLayer();
+    if (event.key === 'Escape' && top) {
+        requestDrawerLayerClose(top);
     }
 }
 
@@ -1364,6 +1427,7 @@ function initIssueDrawer() {
     if (window[DRAWER_INIT_FLAG]) return;
     window[DRAWER_INIT_FLAG] = true;
 
+    drawerLayerClosers.issue = closeDrawerInternal;
     document.addEventListener('click', handleDocumentClick, true);
     document.addEventListener('mouseover', handleIssuePrefetchHover, true);
     document.addEventListener('mouseout', cancelPrefetchHover, true);

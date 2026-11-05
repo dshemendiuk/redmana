@@ -17,7 +17,7 @@
         "https://*/*",
         "http://*/*"
       ],
-      "js": ["content.js"],
+      "js": ["content.js", "user-drawer.js"],
       "css": [
         "styles.css"
       ],

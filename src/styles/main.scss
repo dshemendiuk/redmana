@@ -272,6 +272,416 @@ $issue-card-padding: 6px;
   }
 }
 
+/* --- User overview (drawer + profile page) ---
+   Typography and link colours come from the active Redmine theme; the greys and the
+   warning/error tints follow Redmine's own core stylesheet. */
+
+$uo-border: #e4e4e4;
+$uo-muted: #888;
+$uo-box-bg: #fafafa;
+$uo-warn-bg: #ffebc1;
+$uo-warn-border: #fdd88a;
+$uo-warn-fg: #a6750c;
+$uo-alert-bg: #ffe3e3;
+$uo-alert-border: #f3b6b6;
+$uo-alert-fg: #880000;
+
+.redmana-user-drawer-container {
+  width: min(640px, 100vw);
+
+  .redmana-drawer.redmana-user-drawer {
+    width: min(640px, 100vw);
+  }
+
+  .redmana-uo-header-avatar {
+    flex: 0 0 auto;
+    display: flex;
+  }
+
+  .redmana-uo-header-link {
+    font-size: 0.9em;
+    white-space: nowrap;
+  }
+}
+
+.redmana-uo {
+  .redmana-uo-block + .redmana-uo-block {
+    margin-top: 16px;
+  }
+
+  .redmana-uo-muted {
+    color: $uo-muted;
+  }
+
+  .redmana-drawer-alert {
+    background: $uo-alert-bg;
+    border: 1px solid $uo-alert-border;
+    color: $uo-alert-fg;
+    padding: 8px 10px;
+    border-radius: 4px;
+  }
+
+  .redmana-uo-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+    gap: 6px;
+  }
+
+  .redmana-uo-tile {
+    border: 1px solid $uo-border;
+    background: $uo-box-bg;
+    border-radius: 4px;
+    padding: 5px 8px;
+    min-width: 0;
+
+    strong {
+      display: block;
+      font-size: 1.35em;
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    span {
+      display: block;
+      font-size: 0.85em;
+      color: $uo-muted;
+    }
+
+    &.is-warn {
+      background: $uo-warn-bg;
+      border-color: $uo-warn-border;
+
+      strong {
+        color: $uo-warn-fg;
+      }
+    }
+
+    &.is-alert {
+      background: $uo-alert-bg;
+      border-color: $uo-alert-border;
+
+      strong {
+        color: $uo-alert-fg;
+      }
+    }
+  }
+
+  .redmana-uo-status-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 4px;
+  }
+
+  .redmana-uo-status-chip {
+    font: inherit;
+    font-size: 0.9em;
+    color: inherit;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 12px;
+    padding: 1px 8px;
+    cursor: pointer;
+
+    b {
+      margin-left: 5px;
+    }
+
+    &:hover {
+      border-color: #bbb;
+    }
+  }
+
+  .redmana-uo-group {
+    margin-top: 8px;
+
+    > summary {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 0;
+      font-weight: bold;
+      border-bottom: 1px solid $uo-border;
+      cursor: pointer;
+      list-style: none;
+
+      // display:flex drops the native disclosure triangle, so draw our own.
+      &::-webkit-details-marker {
+        display: none;
+      }
+
+      &::before {
+        content: '';
+        flex: 0 0 auto;
+        width: 0;
+        height: 0;
+        margin: 0 2px;
+        border-style: solid;
+        border-width: 4px 0 4px 6px;
+        border-color: transparent transparent transparent $uo-muted;
+        transition: transform 0.15s ease;
+      }
+
+      &:hover::before {
+        border-left-color: #555;
+      }
+    }
+
+    &[open] > summary::before {
+      transform: rotate(90deg);
+    }
+
+    &:not([open]) > summary {
+      color: $uo-muted;
+    }
+  }
+
+  .redmana-uo-count {
+    font-size: 0.85em;
+    font-weight: normal;
+    color: #555;
+    background: #eee;
+    border-radius: 9px;
+    padding: 0 6px;
+  }
+
+  .redmana-uo-issues,
+  .redmana-uo-events {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .redmana-uo-issue {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 5px 0;
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  .redmana-uo-issue-main {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .redmana-uo-issue-link {
+    word-break: break-word;
+  }
+
+  .redmana-uo-issue-ref {
+    color: $uo-muted;
+    font-size: 0.9em;
+    white-space: nowrap;
+  }
+
+  .redmana-uo-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 10px;
+    margin-top: 1px;
+    font-size: 0.85em;
+    color: $uo-muted;
+  }
+
+  .redmana-uo-priority.is-elevated,
+  .redmana-uo-due.is-overdue {
+    color: $uo-alert-fg;
+    font-weight: bold;
+  }
+
+  .redmana-uo-age {
+    flex: 0 0 auto;
+    min-width: 30px;
+    text-align: center;
+    font-size: 0.85em;
+    font-weight: bold;
+    padding: 1px 6px;
+    border-radius: 9px;
+    background: #f0f0f0;
+    color: #555;
+    cursor: default;
+
+    &.is-warn {
+      background: $uo-warn-bg;
+      color: $uo-warn-fg;
+    }
+
+    &.is-alert {
+      background: $uo-alert-bg;
+      color: $uo-alert-fg;
+    }
+
+    &.is-pending {
+      opacity: 0.5;
+    }
+  }
+
+  .redmana-uo-section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid $uo-border;
+    padding-bottom: 4px;
+
+    h3 {
+      flex: 1 1 auto;
+      margin: 0;
+      padding: 0;
+      border: none;
+    }
+  }
+
+  .redmana-uo-segmented {
+    display: inline-flex;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    overflow: hidden;
+
+    button {
+      font: inherit;
+      font-size: 0.85em;
+      color: inherit;
+      background: #fff;
+      border: none;
+      padding: 1px 8px;
+      cursor: pointer;
+
+      + button {
+        border-left: 1px solid #ddd;
+      }
+
+      &.is-selected {
+        background: #eee;
+        font-weight: bold;
+      }
+    }
+  }
+
+  .redmana-uo-more {
+    font-size: 0.85em;
+    white-space: nowrap;
+  }
+
+  .redmana-uo-activity > .redmana-uo-muted,
+  .redmana-uo-activity > .redmana-drawer-alert,
+  .redmana-uo-involvement {
+    margin-top: 8px;
+  }
+
+  .redmana-uo-involvement .redmana-uo-tile strong {
+    font-size: 1.15em;
+  }
+
+  .redmana-uo-day h4 {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 12px 0 2px;
+    padding: 0 0 2px;
+    border-bottom: 1px solid #f0f0f0;
+    font-size: 1em;
+
+    .redmana-uo-muted {
+      font-weight: normal;
+      font-size: 0.9em;
+    }
+  }
+
+  .redmana-uo-event {
+    display: flex;
+    gap: 8px;
+    padding: 5px 0;
+    border-bottom: 1px solid #f6f6f6;
+
+    &.is-received .redmana-uo-event-body {
+      color: $uo-muted;
+    }
+  }
+
+  .redmana-uo-event-time {
+    flex: 0 0 56px;
+    white-space: nowrap;
+    color: $uo-muted;
+    font-size: 0.85em;
+    padding-top: 1px;
+  }
+
+  .redmana-uo-event-body {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .redmana-uo-status-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 5px;
+    font-size: 0.8em;
+    color: #555;
+    background: #eee;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+
+  .redmana-uo-event-line {
+    margin-top: 2px;
+    font-size: 0.9em;
+  }
+
+  .redmana-uo-change {
+    margin-right: 10px;
+  }
+
+  .redmana-uo-change-label,
+  .redmana-uo-change-from {
+    color: $uo-muted;
+  }
+
+  .redmana-uo-change-to {
+    font-weight: bold;
+  }
+
+  .redmana-uo-notes {
+    margin-top: 3px;
+    padding-left: 8px;
+    border-left: 2px solid $uo-border;
+    font-size: 0.9em;
+    color: #555;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
+
+.redmana-uo-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  margin: 0 !important;
+}
+
+.redmana-uo-initials {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #ddd;
+  color: #555;
+  font-size: 11px;
+  font-weight: bold;
+}
+
+.redmana-uo-profile {
+  margin: 8px 0 20px;
+}
+
+.redmana-uo-replaced {
+  display: none !important;
+}
+
 /*
  Overrides
  */
