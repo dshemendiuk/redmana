@@ -1173,26 +1173,33 @@ async function revalidateDrawerIssue(requestUrl, requestToken, effectiveIssueUrl
 // showAndScrollTo("update"), the description editor, quoting a note - find the page's
 // copy first and open the form behind the drawer. While the drawer is open, the page's
 // duplicates give up their ids; they get them back when it closes.
+//
+// Only the editing parts are involved: ids elsewhere carry page styling (the sticky issue
+// header is hidden by an #id rule, for one) and nothing in the drawer looks them up.
+const SHADOWED_ID_SCOPE_SELECTOR = '#update, #update [id], form[id], form [id]';
 let shadowedPageElements = [];
 
 function shadowDuplicatePageIds(drawerContent) {
     restoreShadowedPageIds();
-    drawerContent.querySelectorAll('[id]').forEach(element => {
+    drawerContent.querySelectorAll(SHADOWED_ID_SCOPE_SELECTOR).forEach(element => {
         const pageElement = document.getElementById(element.id);
         if (!pageElement || pageElement === element || pageElement.closest('.redmana-drawer-container')) return;
-        pageElement.setAttribute('data-redmana-shadowed-id', pageElement.id);
+
+        // An #id rule may be what keeps it hidden; keep it hidden without the id.
+        const pinnedHidden = !pageElement.style.display && getComputedStyle(pageElement).display === 'none';
+        if (pinnedHidden) pageElement.style.display = 'none';
+
+        shadowedPageElements.push({ element: pageElement, id: pageElement.id, pinnedHidden });
         pageElement.removeAttribute('id');
-        shadowedPageElements.push(pageElement);
     });
 }
 
 function restoreShadowedPageIds() {
-    shadowedPageElements.forEach(element => {
-        // The closed drawer may still hold its copy for a moment; the page's element comes
-        // first in the document, so it wins lookups again either way.
-        const id = element.getAttribute('data-redmana-shadowed-id');
-        element.removeAttribute('data-redmana-shadowed-id');
-        if (id) element.id = id;
+    // The closed drawer may still hold its copy for a moment; the page's element comes first
+    // in the document, so it wins lookups again either way.
+    shadowedPageElements.forEach(({ element, id, pinnedHidden }) => {
+        element.id = id;
+        if (pinnedHidden && element.style.display === 'none') element.style.removeProperty('display');
     });
     shadowedPageElements = [];
 }
