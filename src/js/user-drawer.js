@@ -26,6 +26,7 @@ const MAX_CACHED_JOURNALS = 400;
 const OVERVIEW_REFRESH_AFTER_MS = 15000;
 const USER_PREFETCH_DELAY_MS = 200;
 const NOTIFY_THROTTLE_MS = 250;
+const PROFILE_REFRESH_AFTER_MS = 300000;
 const DAY_MS = 86400000;
 const NOTES_EXCERPT_LENGTH = 280;
 
@@ -293,7 +294,9 @@ async function fetchTimeEntries(userId, startKey, endKey) {
 // seconds on a large instance. The details then come from the journals themselves,
 // because the activity stream leaves out every change that has neither a note nor a
 // status change (reassignments, priority, due dates...).
-async function fetchActivityIssueIds(userId, startKey) {
+// The first page also comes back through `onFirstPage` as Redmine's own feed, which is
+// shown as-is while the journals behind the richer version load.
+async function fetchActivityIssueIds(userId, startKey, onFirstPage) {
     const ids = new Set();
     let from = localDateKey(Date.now());
 
@@ -303,6 +306,9 @@ async function fetchActivityIssueIds(userId, startKey) {
             throw new Error(`Activity page responded ${response.status}`);
         }
         const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+        if (page === 0 && onFirstPage) {
+            onFirstPage(parseNativeActivity(doc));
+        }
         doc.querySelectorAll('#activity dt a[href]').forEach(anchor => {
             const match = anchor.getAttribute('href').match(/\/issues\/(\d+)/);
             if (match) ids.add(Number(match[1]));
@@ -315,6 +321,32 @@ async function fetchActivityIssueIds(userId, startKey) {
     }
 
     return ids;
+}
+
+// Day headings stay as Redmine wrote them ("Today", "11/04/2026"): their format follows
+// the user's date settings and isn't worth parsing for a preview that lives a second.
+function parseNativeActivity(doc) {
+    const days = [];
+    doc.querySelectorAll('#activity h3').forEach(heading => {
+        const list = heading.nextElementSibling;
+        if (!list || list.tagName !== 'DL') return;
+        const entries = [];
+        list.querySelectorAll(':scope > dt').forEach(term => {
+            const link = term.querySelector('a[href]');
+            if (!link) return;
+            const definition = term.nextElementSibling;
+            const description = definition && definition.tagName === 'DD' ? definition.querySelector('.description') : null;
+            const time = term.querySelector('.time');
+            entries.push({
+                time: time ? time.textContent.trim() : '',
+                href: link.getAttribute('href'),
+                title: link.textContent.trim(),
+                notes: description ? description.textContent : ''
+            });
+        });
+        if (entries.length) days.push({ label: heading.textContent.trim(), entries });
+    });
+    return days;
 }
 
 function findPreviousActivityDate(doc, currentFrom) {
@@ -556,6 +588,7 @@ function createOverviewState(person) {
         reference: null,
         workload: { status: 'idle', issues: [], totalCount: 0, history: new Map(), error: null, fetchedAt: 0, promise: null },
         notifyTimer: null,
+        profile: { status: 'idle', node: null, fetchedAt: 0, promise: null },
         activity: new Map(), // days -> { status, events, hoursByDay, totalHours, error, fetchedAt, promise }
         collapsedGroups: null
     };
@@ -680,10 +713,42 @@ function refreshWorkload(state, { force = false } = {}) {
     return workload.promise;
 }
 
+// The native profile column (login, last sign-in, issue counts, projects). Redmine renders
+// that page slowly for busy people - seconds, not milliseconds - so it fills in last.
+function refreshProfile(state) {
+    const profile = state.profile;
+    if (profile.promise) return profile.promise;
+    if (profile.status === 'ready' && Date.now() - profile.fetchedAt < PROFILE_REFRESH_AFTER_MS) {
+        return Promise.resolve();
+    }
+    if (profile.status !== 'ready') profile.status = 'loading';
+
+    profile.promise = fetch(redmineUrl(`users/${state.userId}`), { credentials: 'include' })
+        .then(response => {
+            if (!response.ok) throw new Error(`Profile page responded ${response.status}`);
+            return response.text();
+        })
+        .then(html => {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const column = doc.querySelector('#content .splitcontentleft');
+            if (column) column.querySelectorAll('script').forEach(element => element.remove());
+            Object.assign(profile, { status: column ? 'ready' : 'empty', node: column, fetchedAt: Date.now() });
+        })
+        .catch(error => {
+            console.warn('Redmana: Failed to load the profile page.', error);
+            if (profile.status !== 'ready') profile.status = 'error';
+        })
+        .finally(() => {
+            profile.promise = null;
+            notifyOverview(state);
+        });
+    return profile.promise;
+}
+
 function refreshActivity(state, days, { force = false } = {}) {
     let activity = state.activity.get(days);
     if (!activity) {
-        activity = { status: 'idle', events: [], hoursByDay: new Map(), totalHours: null, error: null, fetchedAt: 0, promise: null };
+        activity = { status: 'idle', preview: null, events: [], hoursByDay: new Map(), totalHours: null, error: null, fetchedAt: 0, promise: null };
         state.activity.set(days, activity);
     }
     if (activity.promise) return activity.promise;
@@ -703,7 +768,11 @@ function refreshActivity(state, days, { force = false } = {}) {
     activity.promise = loadReferenceData()
         .then(reference => Promise.all([
             reference,
-            fetchActivityIssueIds(userId, startKey),
+            fetchActivityIssueIds(userId, startKey, nativeDays => {
+                if (hadData) return;
+                activity.preview = nativeDays.slice(0, days);
+                scheduleNotify(state);
+            }),
             fetchCreatedIssues(userId, startKey).catch(() => []),
             fetchTimeEntries(userId, startKey, endKey).catch(() => null),
             // Open issues on them that moved in the period - where someone may have handed one over.
@@ -784,6 +853,32 @@ function saveActivityDaysPreference(days) {
 }
 
 let activityDays = loadActivityDaysPreference();
+
+// Order inside a status group, by time in the status. Newest first by default: issues that
+// sat for a year are usually stale, while the fresh ones are what to ask about.
+const ISSUE_SORT_KEY = 'redmanaUserIssueSort';
+const ISSUE_SORT_OPTIONS = [
+    { value: 'newest', label: 'Newest first' },
+    { value: 'oldest', label: 'Oldest first' }
+];
+
+function loadIssueSortPreference() {
+    try {
+        return localStorage.getItem(ISSUE_SORT_KEY) === 'oldest' ? 'oldest' : 'newest';
+    } catch (error) {
+        return 'newest';
+    }
+}
+
+function saveIssueSortPreference(value) {
+    try {
+        localStorage.setItem(ISSUE_SORT_KEY, value);
+    } catch (error) {
+        // Not worth surfacing; the choice just won't be remembered.
+    }
+}
+
+let issueSortOrder = loadIssueSortPreference();
 
 // --- Formatting ---
 
@@ -994,12 +1089,14 @@ function groupIssuesByStatus(state) {
     const order = status => (reference && reference.statusOrder.has(status.id) ? reference.statusOrder.get(status.id) : 9999);
     const sorted = Array.from(groups.values()).sort((a, b) => order(a.status) - order(b.status));
 
+    // Until its history arrives an issue sorts by its last update, the closest stand-in.
     const history = state.workload.history;
+    const direction = issueSortOrder === 'oldest' ? 1 : -1;
     sorted.forEach(group => {
         group.issues.sort((a, b) => {
             const aSince = history.has(a.id) ? history.get(a.id).since : Date.parse(a.updated_on);
             const bSince = history.has(b.id) ? history.get(b.id).since : Date.parse(b.updated_on);
-            return aSince - bSince; // Longest-waiting first.
+            return (aSince - bSince) * direction;
         });
     });
     return sorted;
@@ -1018,6 +1115,21 @@ function renderStatusStrip(groups, scrollRoot) {
             }
         }, h('span', { text: group.status.name }), h('b', { text: String(group.issues.length) })))
     );
+}
+
+function renderSortControl(state) {
+    return h('div', { class: 'redmana-uo-segmented', role: 'group', 'aria-label': 'Sort issues by time in status' },
+        ISSUE_SORT_OPTIONS.map(option => h('button', {
+            type: 'button',
+            class: option.value === issueSortOrder ? 'is-selected' : null,
+            'aria-pressed': option.value === issueSortOrder ? 'true' : 'false',
+            title: 'Order inside each status, by how long the issue has been in it',
+            onclick: () => {
+                issueSortOrder = option.value;
+                saveIssueSortPreference(option.value);
+                notifyOverview(state);
+            }
+        }, option.label)));
 }
 
 function renderIssueRow(issue, state) {
@@ -1070,7 +1182,7 @@ function renderWorkload(state, scrollRoot) {
     const workload = state.workload;
 
     if (workload.status === 'idle' || workload.status === 'loading') {
-        return renderMuted('Loading issues…');
+        return renderSkeleton(5);
     }
     if (workload.status === 'error') {
         return renderAlert(errorMessage(workload.error, 'assigned issues'));
@@ -1091,7 +1203,9 @@ function renderWorkload(state, scrollRoot) {
     }
 
     return h('div', { class: 'redmana-uo-workload' },
-        renderStatusStrip(groups, scrollRoot),
+        h('div', { class: 'redmana-uo-toolbar' },
+            renderStatusStrip(groups, scrollRoot),
+            renderSortControl(state)),
         groups.map(group => {
             const details = h('details', {
                 class: 'redmana-uo-group',
@@ -1186,7 +1300,10 @@ function renderActivity(state, onDaysChange) {
 
     let body;
     if (!activity || activity.status === 'idle' || activity.status === 'loading') {
-        body = renderMuted('Loading activity…');
+        body = [
+            renderInvolvement(null),
+            activity && activity.preview ? renderNativeActivity(activity.preview) : renderSkeleton(4)
+        ];
     } else if (activity.status === 'error') {
         body = renderAlert(errorMessage(activity.error, 'activity'));
     } else {
@@ -1196,28 +1313,58 @@ function renderActivity(state, onDaysChange) {
     return h('div', { class: 'redmana-uo-activity' }, header, body);
 }
 
-// Period stats: they follow the 3d / 7d / 14d switch above them.
+// Period stats: they follow the 3d / 7d / 14d switch above them. Without data yet the
+// tiles are still drawn, so nothing shifts when the numbers arrive.
 function renderInvolvement(activity) {
-    const involvement = activity.involvement;
+    const involvement = activity ? activity.involvement : null;
+    const value = key => (involvement ? String(involvement[key]) : '…');
+    let logged = '…';
+    if (activity) logged = activity.totalHours === null ? '—' : formatHours(activity.totalHours);
+
     return h('div', { class: 'redmana-uo-summary redmana-uo-involvement' },
-        tile(String(involvement.involved), 'involved in', {
+        tile(value('involved'), 'involved in', {
             title: 'Issues this person worked on, was handed, or had closed on them in the period.'
         }),
-        tile(String(involvement.touched), 'worked on', {
+        tile(value('touched'), 'worked on', {
             title: 'Issues this person updated, commented on or created in the period.'
         }),
-        tile(String(involvement.commented), 'commented in', {
+        tile(value('commented'), 'commented in', {
             title: 'Issues this person left at least one comment in.'
         }),
-        tile(String(involvement.received), 'handed to them', {
+        tile(value('received'), 'handed to them', {
             title: 'Issues that became assigned to this person during the period: reassigned to them or created on them.'
         }),
-        tile(String(involvement.statusChanges), 'status changes', {
+        tile(value('statusChanges'), 'status changes', {
             title: 'Status changes this person made.'
         }),
-        tile(activity.totalHours === null ? '—' : formatHours(activity.totalHours), 'logged', {
-            title: activity.totalHours === null ? 'Time entries are not available.' : 'Time logged in the period.'
+        tile(logged, 'logged', {
+            title: activity && activity.totalHours === null ? 'Time entries are not available.' : 'Time logged in the period.'
         }));
+}
+
+// Redmine's own feed, in the same layout as ours, until the journal-based version is ready.
+function renderNativeActivity(days) {
+    if (!days.length) {
+        return renderSkeleton(2);
+    }
+    return h('div', { class: 'redmana-uo-days is-preview', title: 'Loading details…' }, days.map(day =>
+        h('section', { class: 'redmana-uo-day' },
+            h('h4', null, h('span', { text: day.label })),
+            h('ul', { class: 'redmana-uo-events' }, day.entries.map(entry => {
+                const excerpt = notesExcerpt(entry.notes);
+                return h('li', { class: 'redmana-uo-event' },
+                    h('span', { class: 'redmana-uo-event-time', text: entry.time }),
+                    h('div', { class: 'redmana-uo-event-body' },
+                        h('a', { class: 'redmana-uo-issue-link', href: entry.href, text: entry.title }),
+                        excerpt ? h('div', { class: 'redmana-uo-notes', text: excerpt }) : null));
+            })))));
+}
+
+function renderSkeleton(rows) {
+    return h('div', { class: 'redmana-uo-skeleton', 'aria-label': 'Loading', role: 'status' },
+        Array.from({ length: rows }, () => h('div', { class: 'redmana-uo-skeleton-row' },
+            h('span', { class: 'redmana-uo-skeleton-bar' }),
+            h('span', { class: 'redmana-uo-skeleton-bar is-short' }))));
 }
 
 function renderActivityDays(activity) {
@@ -1252,12 +1399,38 @@ function renderActivityDays(activity) {
     }));
 }
 
+// --- Rendering: native profile ---
+
+function renderProfile(state) {
+    const profile = state.profile;
+    if (profile.status === 'empty' || profile.status === 'error') {
+        return [];
+    }
+
+    const header = h('div', { class: 'redmana-uo-section-header' },
+        h('h3', { text: 'Profile' }),
+        h('a', {
+            class: 'redmana-uo-more',
+            href: redmineUrl(`users/${state.userId}`),
+            target: '_blank',
+            rel: 'noopener noreferrer',
+            'data-redmana-bypass': 'true'
+        }, 'Profile page ↗'));
+
+    const body = profile.status === 'ready'
+        ? h('div', { class: 'redmana-uo-native-profile' }, Array.from(profile.node.cloneNode(true).childNodes))
+        : renderSkeleton(3);
+
+    return [header, body];
+}
+
 // --- Views ---
 
 // A view owns a set of containers and redraws them whenever its user's state changes.
-function createOverviewView({ summary, workload, activity, scrollRoot, onRender = null }) {
+function createOverviewView({ summary, workload, activity, profile = null, scrollRoot, onRender = null }) {
     const view = {
         userId: null,
+        wantsProfile: !!profile,
         render(state) {
             if (onRender) onRender(state);
             const scrollTop = scrollRoot ? scrollRoot.scrollTop : 0;
@@ -1271,6 +1444,7 @@ function createOverviewView({ summary, workload, activity, scrollRoot, onRender 
                     notifyOverview(state);
                 }));
             }
+            if (profile) profile.replaceChildren(...renderProfile(state));
             if (scrollRoot) scrollRoot.scrollTop = scrollTop;
         }
     };
@@ -1285,6 +1459,7 @@ function showOverview(view, person) {
     view.render(state);
     refreshWorkload(state);
     refreshActivity(state, activityDays);
+    if (view.wantsProfile) refreshProfile(state);
     return state;
 }
 
@@ -1330,7 +1505,8 @@ function ensureUserDrawerElements() {
     const summary = h('div', { class: 'redmana-uo-block' });
     const workload = h('div', { class: 'redmana-uo-block' });
     const activity = h('div', { class: 'redmana-uo-block' });
-    const body = h('div', { class: 'redmana-drawer-body redmana-uo' }, summary, workload, activity);
+    const profile = h('div', { class: 'redmana-uo-block' });
+    const body = h('div', { class: 'redmana-drawer-body redmana-uo' }, summary, workload, activity, profile);
 
     drawer.append(header, body);
     container.appendChild(drawer);
@@ -1343,7 +1519,7 @@ function ensureUserDrawerElements() {
         avatarSlot,
         titleLink,
         issuesLink,
-        view: createOverviewView({ summary, workload, activity, scrollRoot: body, onRender: renderUserDrawerHeader })
+        view: createOverviewView({ summary, workload, activity, profile, scrollRoot: body, onRender: renderUserDrawerHeader })
     };
     return userDrawerElements;
 }
