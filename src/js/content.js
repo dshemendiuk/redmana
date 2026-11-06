@@ -480,6 +480,7 @@ function showDrawerError(message) {
 function closeDrawerInternal() {
     if (!drawerState.isOpen) return;
     forgetDrawerLayer('issue');
+    restoreShadowedPageIds();
     const elements = ensureDrawerElements();
     elements.container.classList.remove('is-open');
     elements.drawer.setAttribute('aria-hidden', 'true');
@@ -957,6 +958,7 @@ function showIssuePreview(issueUrl, triggerElement) {
 
     const elements = ensureDrawerElements();
     setDrawerTitle(data.tracker ? `${data.tracker} #${data.id}` : `#${data.id}`, issueUrl);
+    restoreShadowedPageIds();
     elements.body.innerHTML = '';
     elements.body.scrollTop = 0;
     elements.body.appendChild(renderIssuePreview(data));
@@ -1054,6 +1056,7 @@ function renderIssueContent(content, effectiveIssueUrl, anchor, { preserveScroll
     elements.body.innerHTML = '';
     elements.body.appendChild(clonedContent);
     elements.body.scrollTop = previousScroll;
+    shadowDuplicatePageIds(clonedContent);
 
     drawerState.renderedSignature = issueContentSignature(content);
     learnIssueLabels(content);
@@ -1163,6 +1166,35 @@ async function revalidateDrawerIssue(requestUrl, requestToken, effectiveIssueUrl
     }
 
     renderIssueContent(content, effectiveIssueUrl, anchor, { preserveScroll: true });
+}
+
+// The drawer holds a copy of an issue page's #content. On a page that is itself an issue,
+// every id inside it then exists twice, and Redmine's own scripts - the Edit button's
+// showAndScrollTo("update"), the description editor, quoting a note - find the page's
+// copy first and open the form behind the drawer. While the drawer is open, the page's
+// duplicates give up their ids; they get them back when it closes.
+let shadowedPageElements = [];
+
+function shadowDuplicatePageIds(drawerContent) {
+    restoreShadowedPageIds();
+    drawerContent.querySelectorAll('[id]').forEach(element => {
+        const pageElement = document.getElementById(element.id);
+        if (!pageElement || pageElement === element || pageElement.closest('.redmana-drawer-container')) return;
+        pageElement.setAttribute('data-redmana-shadowed-id', pageElement.id);
+        pageElement.removeAttribute('id');
+        shadowedPageElements.push(pageElement);
+    });
+}
+
+function restoreShadowedPageIds() {
+    shadowedPageElements.forEach(element => {
+        // The closed drawer may still hold its copy for a moment; the page's element comes
+        // first in the document, so it wins lookups again either way.
+        const id = element.getAttribute('data-redmana-shadowed-id');
+        element.removeAttribute('data-redmana-shadowed-id');
+        if (id) element.id = id;
+    });
+    shadowedPageElements = [];
 }
 
 function attachDrawerEnhancements(drawerContent, issueUrl) {
