@@ -18,13 +18,13 @@ const BACKLOG_COLLAPSE_THRESHOLD = 5;
 const MAX_ASSIGNED_ISSUES = 300;
 const MAX_TIME_ENTRIES = 300;
 const MAX_ACTIVITY_PAGES = 4;
-// Journal requests are cheap (~200ms) but there can be dozens of them per person.
-const JOURNAL_CONCURRENCY = 6;
+// Journal requests are cheap (~200ms) but there can be dozens of them per person, and
+// they share the server with the issue pages the user is actually waiting for.
+const JOURNAL_CONCURRENCY = 4;
 const ISSUE_JOURNAL_TTL_MS = 60000;
 const MAX_CACHED_JOURNALS = 400;
 // A reopened overview renders from memory at once; past this age it also refreshes.
 const OVERVIEW_REFRESH_AFTER_MS = 15000;
-const USER_PREFETCH_DELAY_MS = 200;
 const NOTIFY_THROTTLE_MS = 250;
 const PROFILE_REFRESH_AFTER_MS = 300000;
 const DAY_MS = 86400000;
@@ -39,8 +39,6 @@ const userDrawerState = {
 };
 
 let userDrawerElements = null;
-let userPrefetchTimer = null;
-let userPrefetchId = null;
 
 // userId -> overview state (see createOverviewState)
 const overviewStates = new Map();
@@ -175,7 +173,9 @@ function rememberUser(user) {
     }
 }
 
+// Also hands the issue to the issue drawer, which can draw it at once when it is opened.
 function rememberIssuePeople(issue) {
+    rememberIssueData(issue);
     rememberUser(issue.assigned_to);
     rememberUser(issue.author);
     (issue.journals || []).forEach(journal => rememberUser(journal.user));
@@ -215,7 +215,8 @@ function fetchIssueWithJournals(issueId, knownUpdatedOn) {
     }
 
     const entry = { issue: null, fetchedAt: 0 };
-    entry.promise = redmineApi(`issues/${issueId}.json?include=journals`)
+    entry.promise = whenIssuePagesIdle()
+        .then(() => redmineApi(`issues/${issueId}.json?include=journals`))
         .then(data => {
             entry.issue = data.issue;
             entry.fetchedAt = Date.now();
@@ -266,17 +267,23 @@ async function fetchAssignedIssues(userId, reference, onProgress) {
 
 async function fetchRecentlyUpdatedAssignedIssues(userId, reference, startKey) {
     const page = await redmineApi(`issues.json?assigned_to_id=${userId}&status_id=${reference.openStatusFilter}&updated_on=%3E%3D${startKey}&limit=100`);
-    return page.issues || [];
+    const issues = page.issues || [];
+    issues.forEach(rememberIssueData);
+    return issues;
 }
 
 async function fetchCreatedIssues(userId, startKey) {
     const page = await redmineApi(`issues.json?author_id=${userId}&created_on=%3E%3D${startKey}&status_id=*&limit=100`);
-    return page.issues || [];
+    const issues = page.issues || [];
+    issues.forEach(rememberIssueData);
+    return issues;
 }
 
 async function fetchClosedAssignedIssues(userId, startKey) {
     const page = await redmineApi(`issues.json?assigned_to_id=${userId}&status_id=c&closed_on=%3E%3D${startKey}&limit=100`);
-    return page.issues || [];
+    const issues = page.issues || [];
+    issues.forEach(rememberIssueData);
+    return issues;
 }
 
 async function fetchTimeEntries(userId, startKey, endKey) {
@@ -1614,35 +1621,7 @@ function handleUserLinkClick(event) {
 
     event.preventDefault();
     event.stopPropagation();
-    cancelUserPrefetch();
     openUserDrawer(person);
-}
-
-function cancelUserPrefetch() {
-    if (userPrefetchTimer !== null) {
-        clearTimeout(userPrefetchTimer);
-        userPrefetchTimer = null;
-    }
-    userPrefetchId = null;
-}
-
-// Same idea as the issue prefetch: once the pointer settles on a name, start loading the
-// workload so the drawer opens with data instead of a spinner.
-function handleUserLinkHover(event) {
-    const anchor = event.target.closest && event.target.closest('a[href]');
-    const person = anchor ? personFromUserLink(anchor) : null;
-    if (!person) {
-        cancelUserPrefetch();
-        return;
-    }
-    if (userPrefetchId === person.id) return;
-
-    cancelUserPrefetch();
-    userPrefetchId = person.id;
-    userPrefetchTimer = setTimeout(() => {
-        userPrefetchTimer = null;
-        refreshWorkload(getOverviewState(person));
-    }, USER_PREFETCH_DELAY_MS);
 }
 
 // --- Profile page ---
@@ -1693,7 +1672,6 @@ function initUserOverview() {
 
     drawerLayerClosers.user = closeUserDrawerInternal;
     document.addEventListener('click', handleUserLinkClick, true);
-    document.addEventListener('mouseover', handleUserLinkHover, true);
     enhanceUserProfilePage();
 }
 

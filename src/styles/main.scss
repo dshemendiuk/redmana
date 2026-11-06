@@ -386,28 +386,6 @@ $uo-alert-fg: #880000;
     gap: 4px;
   }
 
-  // Placeholder rows shaped like the content they stand in for.
-  .redmana-uo-skeleton-row {
-    padding: 6px 0;
-    border-bottom: 1px solid #f0f0f0;
-  }
-
-  .redmana-uo-skeleton-bar {
-    display: block;
-    height: 0.8em;
-    width: 78%;
-    border-radius: 3px;
-    background: linear-gradient(90deg, #eee 0%, #f6f6f6 50%, #eee 100%);
-    background-size: 200% 100%;
-    animation: redmana-uo-shimmer 1.2s ease-in-out infinite;
-
-    &.is-short {
-      width: 40%;
-      margin-top: 5px;
-      height: 0.7em;
-    }
-  }
-
   .redmana-uo-days.is-preview {
     opacity: 0.75;
   }
@@ -710,6 +688,41 @@ $uo-alert-fg: #880000;
     -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
+  }
+}
+
+// Placeholder rows shaped like the content they stand in for (user overview and the
+// issue drawer preview).
+.redmana-uo-skeleton-row {
+  padding: 6px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.redmana-uo-skeleton-bar {
+  display: block;
+  height: 0.8em;
+  width: 78%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #eee 0%, #f6f6f6 50%, #eee 100%);
+  background-size: 200% 100%;
+  animation: redmana-uo-shimmer 1.2s ease-in-out infinite;
+
+  &.is-short {
+    width: 40%;
+    margin-top: 5px;
+    height: 0.7em;
+  }
+}
+
+.redmana-issue-preview {
+  .redmana-issue-preview-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .description .redmana-uo-skeleton,
+  > .redmana-uo-skeleton {
+    margin-top: 8px;
   }
 }
 

@@ -527,6 +527,31 @@ const MAX_INFLIGHT_PREFETCHES = 2;
 
 // requestUrl -> { promise, html, fetchedAt }
 const issueHtmlCache = new Map();
+
+// Issue pages are the slowest thing Redmine renders, and background requests from other
+// features (user-drawer.js journals) measurably slow them down - they share the server.
+// While any issue page is on its way, that background work waits.
+let issuePagesInFlight = 0;
+let issuePagesIdleWaiters = [];
+
+function whenIssuePagesIdle() {
+    if (!issuePagesInFlight) return Promise.resolve();
+    return new Promise(resolve => issuePagesIdleWaiters.push(resolve));
+}
+
+function trackIssuePageRequest(promise) {
+    issuePagesInFlight += 1;
+    const settle = () => {
+        issuePagesInFlight -= 1;
+        if (!issuePagesInFlight) {
+            const waiters = issuePagesIdleWaiters;
+            issuePagesIdleWaiters = [];
+            waiters.forEach(resolve => resolve());
+        }
+    };
+    promise.then(settle, settle);
+    return promise;
+}
 let prefetchHoverTimer = null;
 let prefetchHoverUrl = null;
 let inflightPrefetches = 0;
@@ -566,7 +591,7 @@ function fetchIssueHtml(requestUrl, { force = false } = {}) {
     }
 
     const entry = { fetchedAt: Date.now(), html: undefined, finalUrl: requestUrl };
-    entry.promise = fetch(requestUrl, { credentials: 'include' })
+    entry.promise = trackIssuePageRequest(fetch(requestUrl, { credentials: 'include' }))
         .then(response => {
             if (!response.ok) {
                 throw new Error(`Response not OK (${response.status})`);
@@ -664,7 +689,281 @@ function handleIssuePrefetchIntent(event) {
     prefetchIssue(resolveIssueUrl(anchor.getAttribute('href')));
 }
 
-async function loadIssueIntoDrawer(issueUrl, { force = false } = {}) {
+// --- Issue preview ---
+// A cold issue page takes the server from half a second to several seconds. Whatever is
+// already known about the issue - the card or row that was clicked, or data another
+// Redmana feature fetched - is drawn at once in Redmine's own issue markup, so the real
+// page lands in the same places when it arrives.
+
+const ISSUE_LABELS_KEY = `redmanaIssueLabels:${window.location.host}`;
+// Labels are learned from the first real issue page (they are localized); these English
+// ones only cover the very first preview.
+const DEFAULT_ISSUE_LABELS = {
+    status: 'Status:',
+    priority: 'Priority:',
+    'assigned-to': 'Assignee:',
+    'start-date': 'Start date:',
+    'due-date': 'Due date:',
+    progress: '% Done:',
+    description: 'Description'
+};
+const MAX_KNOWN_ISSUES = 500;
+const MAX_PREVIEW_DESCRIPTION_LENGTH = 3000;
+
+// issueId -> Redmine issue JSON that other features (user-drawer.js) already hold.
+const knownIssueData = new Map();
+
+function rememberIssueData(issue) {
+    if (!issue || !issue.id) return;
+    knownIssueData.delete(issue.id);
+    knownIssueData.set(issue.id, issue);
+    while (knownIssueData.size > MAX_KNOWN_ISSUES) {
+        knownIssueData.delete(knownIssueData.keys().next().value);
+    }
+}
+
+function loadIssueLabels() {
+    try {
+        return { ...DEFAULT_ISSUE_LABELS, ...JSON.parse(localStorage.getItem(ISSUE_LABELS_KEY) || '{}') };
+    } catch (error) {
+        return { ...DEFAULT_ISSUE_LABELS };
+    }
+}
+
+function learnIssueLabels(content) {
+    const learned = {};
+    content.querySelectorAll('.issue .attributes .attribute').forEach(attribute => {
+        const key = Object.keys(DEFAULT_ISSUE_LABELS).find(name => attribute.classList.contains(name));
+        const label = attribute.querySelector('.label');
+        if (key && label) learned[key] = label.textContent.trim();
+    });
+    const description = content.querySelector('.issue .description p strong');
+    if (description) learned.description = description.textContent.trim();
+    if (!Object.keys(learned).length) return;
+
+    try {
+        const serialized = JSON.stringify(learned);
+        if (localStorage.getItem(ISSUE_LABELS_KEY) !== serialized) {
+            localStorage.setItem(ISSUE_LABELS_KEY, serialized);
+        }
+    } catch (error) {
+        // Previews just keep the default labels.
+    }
+}
+
+function classNumber(element, prefix) {
+    const match = (element.className || '').match(new RegExp(`(?:^|\\s)${prefix}-(\\d+)(?:\\s|$)`));
+    return match ? Number(match[1]) : null;
+}
+
+function cellText(row, className) {
+    const cell = row.querySelector(`td.${className}`);
+    const text = cell ? cell.textContent.trim() : '';
+    return text || null;
+}
+
+function avatarFrom(container) {
+    const img = container && container.querySelector('img.gravatar, img.avatar');
+    return img ? { src: img.currentSrc || img.src, srcset: img.getAttribute('srcset') } : null;
+}
+
+// Fills the gaps in `data` from the clicked card (Agile board) or issue row (issue lists,
+// related issues inside the drawer).
+function readIssueContext(data, anchor) {
+    const card = anchor.closest('.issue-card');
+    if (card) {
+        const reference = card.querySelector('.issue-id strong');
+        if (reference && !data.tracker) {
+            data.tracker = reference.textContent.replace(/#\d+.*$/, '').trim() || null;
+        }
+        const name = card.querySelector('p.name a');
+        if (name && !data.subject) data.subject = name.textContent.trim();
+
+        const column = card.closest('td[data-id]');
+        if (column && !data.status) {
+            const heading = document.querySelector(`table.issues-board thead th[data-column-id="${column.dataset.id}"]`);
+            if (heading) {
+                data.statusId = Number(column.dataset.id);
+                data.status = heading.textContent.replace(/\s*\(\d+\)\s*$/, '').trim();
+            }
+        }
+
+        const assignee = card.querySelector('.assigned-user a.user');
+        if (assignee && !data.assignee) {
+            data.assignee = { name: assignee.textContent.trim(), href: assignee.getAttribute('href'), avatar: avatarFrom(assignee.parentElement) };
+        }
+        return;
+    }
+
+    const row = anchor.closest('tr.issue');
+    if (!row) return;
+    data.trackerId = data.trackerId || classNumber(row, 'tracker');
+    data.statusId = data.statusId || classNumber(row, 'status');
+    data.priorityId = data.priorityId || classNumber(row, 'priority');
+    data.tracker = data.tracker || cellText(row, 'tracker');
+    data.status = data.status || cellText(row, 'status');
+    data.priority = data.priority || cellText(row, 'priority');
+    data.subject = data.subject || cellText(row, 'subject');
+    data.startDate = data.startDate || cellText(row, 'start_date');
+    data.dueDate = data.dueDate || cellText(row, 'due_date');
+    if (data.doneRatio === undefined || data.doneRatio === null) {
+        const done = cellText(row, 'done_ratio');
+        if (done) data.doneRatio = parseInt(done, 10) || 0;
+    }
+    const assignee = row.querySelector('td.assigned_to a');
+    if (assignee && !data.assignee) {
+        data.assignee = { name: assignee.textContent.trim(), href: assignee.getAttribute('href'), avatar: avatarFrom(assignee.parentElement) };
+    }
+}
+
+function issuePreviewData(issueId, triggerElement) {
+    const data = { id: issueId };
+
+    const known = knownIssueData.get(Number(issueId));
+    if (known) {
+        Object.assign(data, {
+            trackerId: known.tracker ? known.tracker.id : null,
+            tracker: known.tracker ? known.tracker.name : null,
+            subject: known.subject,
+            statusId: known.status ? known.status.id : null,
+            status: known.status ? known.status.name : null,
+            priorityId: known.priority ? known.priority.id : null,
+            priority: known.priority ? known.priority.name : null,
+            assignee: known.assigned_to ? { name: known.assigned_to.name, href: `/users/${known.assigned_to.id}` } : null,
+            startDate: known.start_date || null,
+            dueDate: known.due_date || null,
+            doneRatio: known.done_ratio,
+            description: known.description
+        });
+    }
+
+    if (triggerElement) {
+        readIssueContext(data, triggerElement);
+        // A bare link still names the issue: "Bug #123", with the subject often in its title.
+        if (!data.subject && triggerElement.title) data.subject = triggerElement.title.trim();
+        if (!data.tracker) {
+            const match = triggerElement.textContent.trim().match(/^(.+?)\s+#\d+/);
+            if (match) data.tracker = match[1];
+        }
+    }
+
+    return data.subject || data.tracker ? data : null;
+}
+
+function previewElement(tag, className, text) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined && text !== null) element.textContent = text;
+    return element;
+}
+
+function previewAttribute(key, label, valueContent) {
+    const attribute = previewElement('div', `${key} attribute`);
+    const value = previewElement('div', 'value');
+    if (typeof valueContent === 'string') value.textContent = valueContent;
+    else value.appendChild(valueContent);
+    attribute.append(previewElement('div', 'label', label), value);
+    return attribute;
+}
+
+function previewSkeleton(rows) {
+    const skeleton = previewElement('div', 'redmana-uo-skeleton');
+    for (let i = 0; i < rows; i += 1) {
+        const row = previewElement('div', 'redmana-uo-skeleton-row');
+        row.append(previewElement('span', 'redmana-uo-skeleton-bar'), previewElement('span', 'redmana-uo-skeleton-bar is-short'));
+        skeleton.appendChild(row);
+    }
+    return skeleton;
+}
+
+function renderIssuePreview(data) {
+    const labels = loadIssueLabels();
+    const root = previewElement('div', 'redmana-issue-preview');
+    root.id = 'redmana-drawer-content';
+    root.setAttribute('aria-busy', 'true');
+
+    const heading = data.tracker ? `${data.tracker} #${data.id}` : `#${data.id}`;
+    root.appendChild(previewElement('h2', 'inline-block', heading));
+
+    const issueClasses = ['issue', 'details'];
+    if (data.trackerId) issueClasses.push(`tracker-${data.trackerId}`);
+    if (data.statusId) issueClasses.push(`status-${data.statusId}`);
+    if (data.priorityId) issueClasses.push(`priority-${data.priorityId}`);
+    const issue = previewElement('div', issueClasses.join(' '));
+
+    const subject = previewElement('div', 'subject');
+    const subjectInner = previewElement('div');
+    subjectInner.appendChild(previewElement('h3', null, data.subject || ''));
+    subject.appendChild(subjectInner);
+    issue.appendChild(subject);
+
+    const left = previewElement('div', 'splitcontentleft');
+    const right = previewElement('div', 'splitcontentleft');
+    if (data.status) left.appendChild(previewAttribute('status', labels.status, data.status));
+    if (data.priority) left.appendChild(previewAttribute('priority', labels.priority, data.priority));
+    if (data.assignee) {
+        const value = document.createDocumentFragment();
+        if (data.assignee.avatar) {
+            const img = previewElement('img', 'gravatar avatar');
+            img.src = data.assignee.avatar.src;
+            if (data.assignee.avatar.srcset) img.setAttribute('srcset', data.assignee.avatar.srcset);
+            img.alt = '';
+            value.append(img, ' ');
+        }
+        const link = previewElement('a', 'user active', data.assignee.name);
+        link.href = data.assignee.href;
+        value.appendChild(link);
+        left.appendChild(previewAttribute('assigned-to', labels['assigned-to'], value));
+    }
+    if (data.startDate) right.appendChild(previewAttribute('start-date', labels['start-date'], data.startDate));
+    if (data.dueDate) right.appendChild(previewAttribute('due-date', labels['due-date'], data.dueDate));
+    if (data.doneRatio !== undefined && data.doneRatio !== null) {
+        right.appendChild(previewAttribute('progress', labels.progress, `${data.doneRatio}%`));
+    }
+    if (left.childElementCount || right.childElementCount) {
+        const attributes = previewElement('div', 'attributes');
+        const split = previewElement('div', 'splitcontent');
+        split.append(left, right);
+        attributes.appendChild(split);
+        issue.appendChild(attributes);
+    }
+
+    issue.appendChild(previewElement('hr'));
+    const description = previewElement('div', 'description');
+    const descriptionTitle = previewElement('p');
+    descriptionTitle.appendChild(previewElement('strong', null, labels.description));
+    description.appendChild(descriptionTitle);
+    if (data.description) {
+        // Raw markup, not rendered - the real page replaces it within moments.
+        const text = data.description.length > MAX_PREVIEW_DESCRIPTION_LENGTH
+            ? `${data.description.slice(0, MAX_PREVIEW_DESCRIPTION_LENGTH)}…`
+            : data.description;
+        description.appendChild(previewElement('div', 'wiki redmana-issue-preview-text', text));
+    } else {
+        description.appendChild(previewSkeleton(3));
+    }
+    issue.appendChild(description);
+    root.appendChild(issue);
+
+    // History and the edit form come with the page.
+    root.appendChild(previewSkeleton(4));
+    return root;
+}
+
+function showIssuePreview(issueUrl, triggerElement) {
+    const issueId = extractIssueIdFromUrl(issueUrl);
+    const data = issueId ? issuePreviewData(issueId, triggerElement) : null;
+    if (!data) return false;
+
+    const elements = ensureDrawerElements();
+    setDrawerTitle(data.tracker ? `${data.tracker} #${data.id}` : `#${data.id}`, issueUrl);
+    elements.body.innerHTML = '';
+    elements.body.scrollTop = 0;
+    elements.body.appendChild(renderIssuePreview(data));
+    return true;
+}
+
+async function loadIssueIntoDrawer(issueUrl, { force = false, triggerElement = null } = {}) {
     ensureDrawerElements();
     const urlObj = new URL(issueUrl, window.location.origin);
     const requestUrl = `${urlObj.origin}${urlObj.pathname}${urlObj.search}`;
@@ -678,7 +977,7 @@ async function loadIssueIntoDrawer(issueUrl, { force = false } = {}) {
     const shouldRevalidate = isWarm && (Date.now() - cached.fetchedAt) > REVALIDATE_AFTER_MS;
 
     // A warm cache hit renders synchronously enough that a loading state would just flash.
-    if (!isWarm) {
+    if (!isWarm && !showIssuePreview(issueUrl, triggerElement)) {
         setDrawerTitle('Loading...', issueUrl);
         showDrawerLoading();
     }
@@ -757,6 +1056,7 @@ function renderIssueContent(content, effectiveIssueUrl, anchor, { preserveScroll
     elements.body.scrollTop = previousScroll;
 
     drawerState.renderedSignature = issueContentSignature(content);
+    learnIssueLabels(content);
 
     attachDrawerEnhancements(clonedContent, effectiveIssueUrl);
     highlightIssueContext(effectiveIssueUrl);
@@ -1172,7 +1472,7 @@ function openIssueDrawer(issueUrl, options = {}) {
             document.body.classList.add(BODY_DRAWER_CLASS);
         }
 
-        loadIssueIntoDrawer(absoluteUrl);
+        loadIssueIntoDrawer(absoluteUrl, { triggerElement: options.triggerElement || null });
     });
 }
 
