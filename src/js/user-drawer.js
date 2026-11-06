@@ -25,6 +25,7 @@ const MAX_CACHED_JOURNALS = 400;
 // A reopened overview renders from memory at once; past this age it also refreshes.
 const OVERVIEW_REFRESH_AFTER_MS = 15000;
 const USER_PREFETCH_DELAY_MS = 200;
+const NOTIFY_THROTTLE_MS = 250;
 const DAY_MS = 86400000;
 const NOTES_EXCERPT_LENGTH = 280;
 
@@ -138,8 +139,15 @@ function loadReferenceData() {
             const statuses = statusData.issue_statuses || [];
             const priorities = priorityData.issue_priorities || [];
             const defaultPriorityIndex = Math.max(0, priorities.findIndex(priority => priority.is_default));
+            // `status_id=open` can be very slow on large instances (10s+ for a busy person,
+            // whatever the page size), while the same set spelled out as ids is instant.
+            // Older Redmines don't report is_closed, so fall back to the keyword there.
+            const knowsClosed = statuses.length && statuses.every(status => typeof status.is_closed === 'boolean');
             return {
                 statuses,
+                openStatusFilter: knowsClosed
+                    ? statuses.filter(status => !status.is_closed).map(status => status.id).join('|') || 'open'
+                    : 'open',
                 statusOrder: new Map(statuses.map((status, index) => [status.id, index])),
                 statusNames: new Map(statuses.map(status => [String(status.id), status.name])),
                 // The first status is where new issues land; time spent there is backlog, not delay.
@@ -226,15 +234,38 @@ function fetchIssueWithJournals(issueId, knownUpdatedOn) {
     return entry.promise;
 }
 
-async function fetchAssignedIssues(userId) {
-    const issues = [];
-    for (let offset = 0; offset < MAX_ASSIGNED_ISSUES; offset += 100) {
-        const page = await redmineApi(`issues.json?assigned_to_id=${userId}&status_id=open&limit=100&offset=${offset}`);
-        issues.push(...(page.issues || []));
-        if (offset + 100 >= (page.total_count || 0)) break;
+// Reports what has arrived so far through `onProgress`, so a long list renders page by page.
+async function fetchAssignedIssues(userId, reference, onProgress) {
+    const path = offset => `issues.json?assigned_to_id=${userId}&status_id=${reference.openStatusFilter}&limit=100&offset=${offset}`;
+    const pages = [];
+    let totalCount = 0;
+    const report = () => {
+        const issues = pages.flat();
+        issues.forEach(rememberIssuePeople);
+        onProgress(issues, totalCount);
+        return issues;
+    };
+
+    const first = await redmineApi(path(0));
+    pages[0] = first.issues || [];
+    totalCount = first.total_count || pages[0].length;
+    report();
+
+    const total = Math.min(totalCount, MAX_ASSIGNED_ISSUES);
+    const rest = [];
+    for (let offset = 100; offset < total; offset += 100) {
+        rest.push(redmineApi(path(offset)).then(page => {
+            pages[offset / 100] = page.issues || [];
+            report();
+        }));
     }
-    issues.forEach(rememberIssuePeople);
-    return issues;
+    await Promise.all(rest);
+    return report();
+}
+
+async function fetchRecentlyUpdatedAssignedIssues(userId, reference, startKey) {
+    const page = await redmineApi(`issues.json?assigned_to_id=${userId}&status_id=${reference.openStatusFilter}&updated_on=%3E%3D${startKey}&limit=100`);
+    return page.issues || [];
 }
 
 async function fetchCreatedIssues(userId, startKey) {
@@ -523,7 +554,8 @@ function createOverviewState(person) {
         name: person.name || '',
         avatar: person.avatar || null,
         reference: null,
-        workload: { status: 'idle', issues: [], history: new Map(), error: null, fetchedAt: 0, promise: null, listPromise: null },
+        workload: { status: 'idle', issues: [], totalCount: 0, history: new Map(), error: null, fetchedAt: 0, promise: null },
+        notifyTimer: null,
         activity: new Map(), // days -> { status, events, hoursByDay, totalHours, error, fetchedAt, promise }
         collapsedGroups: null
     };
@@ -542,11 +574,50 @@ function getOverviewState(person) {
 }
 
 function notifyOverview(state) {
+    if (state.notifyTimer !== null) {
+        clearTimeout(state.notifyTimer);
+        state.notifyTimer = null;
+    }
     overviewViews.forEach(view => {
         if (view.userId === state.userId) {
             view.render(state);
         }
     });
+}
+
+// Coalesces the stream of small updates while a long list fills in.
+function scheduleNotify(state) {
+    if (state.notifyTimer !== null) return;
+    state.notifyTimer = setTimeout(() => {
+        state.notifyTimer = null;
+        notifyOverview(state);
+    }, NOTIFY_THROTTLE_MS);
+}
+
+// Issues in flight first: the backlog is folded away and never flagged as stale anyway.
+function journalFetchOrder(issues, reference) {
+    const rank = issue => (issue.status.id === reference.backlogStatusId ? 1 : 0);
+    return issues.slice().sort((a, b) => rank(a) - rank(b));
+}
+
+function backlogIsFolded(state, issues) {
+    const backlogId = state.reference && state.reference.backlogStatusId;
+    if (state.collapsedGroups) return state.collapsedGroups.has(backlogId);
+    return issues.filter(issue => issue.status.id === backlogId).length > BACKLOG_COLLAPSE_THRESHOLD;
+}
+
+// Fills in the history of a group opened by hand - typically the deferred backlog.
+// Issues already being fetched share their in-flight request through the journal cache.
+function loadMissingHistory(state, issues) {
+    const workload = state.workload;
+    const missing = issues.filter(issue => !workload.history.has(issue.id));
+    if (!missing.length) return Promise.resolve();
+
+    return mapWithConcurrency(missing, JOURNAL_CONCURRENCY, async issue => {
+        const full = await fetchIssueWithJournals(issue.id, issue.updated_on);
+        workload.history.set(full.id, analyzeIssueHistory(full, state.userId));
+        scheduleNotify(state);
+    }).finally(() => notifyOverview(state));
 }
 
 function refreshWorkload(state, { force = false } = {}) {
@@ -556,30 +627,41 @@ function refreshWorkload(state, { force = false } = {}) {
         return Promise.resolve();
     }
 
+    // A refresh of data already on screen is swapped in once complete instead of streaming.
     const hadData = workload.status === 'ready';
     if (!hadData) {
         workload.status = 'loading';
     }
 
-    workload.listPromise = Promise.all([loadReferenceData(), fetchAssignedIssues(state.userId)]);
-    workload.promise = workload.listPromise
-        .then(async ([reference, issues]) => {
+    workload.promise = loadReferenceData()
+        .then(async reference => {
             state.reference = reference;
+            const issues = await fetchAssignedIssues(state.userId, reference, (partial, totalCount) => {
+                workload.totalCount = totalCount;
+                if (hadData) return;
+                workload.issues = partial;
+                workload.status = 'partial';
+                scheduleNotify(state);
+            });
+
             workload.issues = issues;
             workload.error = null;
             if (!state.name && issues[0] && issues[0].assigned_to) {
                 state.name = issues[0].assigned_to.name;
             }
-            if (!hadData) {
-                workload.status = 'partial';
-                notifyOverview(state);
-            }
 
-            const fullIssues = await mapWithConcurrency(issues, JOURNAL_CONCURRENCY,
-                issue => fetchIssueWithJournals(issue.id, issue.updated_on));
-            const history = new Map();
-            fullIssues.forEach(full => {
-                if (full) history.set(full.id, analyzeIssueHistory(full, state.userId));
+            // A folded backlog can be hundreds of issues; their history waits until it is opened.
+            const deferBacklog = backlogIsFolded(state, issues);
+            const wanted = deferBacklog
+                ? issues.filter(issue => issue.status.id !== reference.backlogStatusId)
+                : journalFetchOrder(issues, reference);
+
+            const history = hadData ? new Map() : workload.history;
+            if (!hadData) history.clear();
+            await mapWithConcurrency(wanted, JOURNAL_CONCURRENCY, async issue => {
+                const full = await fetchIssueWithJournals(issue.id, issue.updated_on);
+                history.set(full.id, analyzeIssueHistory(full, state.userId));
+                if (!hadData) scheduleNotify(state);
             });
             workload.history = history;
             workload.status = 'ready';
@@ -617,28 +699,24 @@ function refreshActivity(state, days, { force = false } = {}) {
     const startKey = localDateKey(startMs);
     const endKey = localDateKey(Date.now());
 
-    if (!state.workload.listPromise) {
-        refreshWorkload(state);
-    }
-
-    activity.promise = Promise.all([
-        loadReferenceData(),
-        fetchActivityIssueIds(userId, startKey),
-        fetchCreatedIssues(userId, startKey).catch(() => []),
-        fetchTimeEntries(userId, startKey, endKey).catch(() => null),
-        state.workload.listPromise.then(([, issues]) => issues).catch(() => []),
-        fetchClosedAssignedIssues(userId, startKey).catch(() => [])
-    ])
+    // Deliberately independent of the workload list, which can be long for a busy person.
+    activity.promise = loadReferenceData()
+        .then(reference => Promise.all([
+            reference,
+            fetchActivityIssueIds(userId, startKey),
+            fetchCreatedIssues(userId, startKey).catch(() => []),
+            fetchTimeEntries(userId, startKey, endKey).catch(() => null),
+            // Open issues on them that moved in the period - where someone may have handed one over.
+            fetchRecentlyUpdatedAssignedIssues(userId, reference, startKey).catch(() => []),
+            fetchClosedAssignedIssues(userId, startKey).catch(() => [])
+        ]))
         .then(async ([reference, touchedIds, createdIssues, timeEntries, assignedIssues, closedAssignedIssues]) => {
             const knownUpdatedOn = new Map();
             [...createdIssues, ...assignedIssues].forEach(issue => knownUpdatedOn.set(issue.id, issue.updated_on));
 
             const ids = new Set(touchedIds);
             createdIssues.forEach(issue => ids.add(issue.id));
-            // Assigned issues only matter here when someone else handed them over in the window.
-            assignedIssues.forEach(issue => {
-                if (Date.parse(issue.updated_on) >= startMs) ids.add(issue.id);
-            });
+            assignedIssues.forEach(issue => ids.add(issue.id));
 
             const issueIds = Array.from(ids);
             const fullIssues = await mapWithConcurrency(issueIds, JOURNAL_CONCURRENCY,
@@ -860,7 +938,7 @@ function computeWorkloadStats(state) {
         if (reference && issue.priority && reference.elevatedPriorityIds.has(issue.priority.id)) elevated += 1;
     });
 
-    return { total: issues.length, stale, overdue, elevated };
+    return { total: Math.max(issues.length, state.workload.totalCount), stale, overdue, elevated };
 }
 
 function tile(value, label, { tone = null, title = null } = {}) {
@@ -1002,12 +1080,14 @@ function renderWorkload(state, scrollRoot) {
     }
 
     const groups = groupIssuesByStatus(state);
-    if (!state.collapsedGroups) {
-        // Start with a big backlog folded away; everything in flight stays visible.
-        state.collapsedGroups = new Set(groups
-            .filter(group => state.reference && group.status.id === state.reference.backlogStatusId &&
-                group.issues.length > BACKLOG_COLLAPSE_THRESHOLD)
-            .map(group => group.status.id));
+    // Start with a big backlog folded away; everything in flight stays visible. The choice
+    // is only settled once the whole list is in, so the first page alone can't decide it.
+    const collapsed = state.collapsedGroups || new Set(groups
+        .filter(group => state.reference && group.status.id === state.reference.backlogStatusId &&
+            group.issues.length > BACKLOG_COLLAPSE_THRESHOLD)
+        .map(group => group.status.id));
+    if (!state.collapsedGroups && workload.status === 'ready') {
+        state.collapsedGroups = collapsed;
     }
 
     return h('div', { class: 'redmana-uo-workload' },
@@ -1016,14 +1096,21 @@ function renderWorkload(state, scrollRoot) {
             const details = h('details', {
                 class: 'redmana-uo-group',
                 'data-redmana-status-group': String(group.status.id),
-                open: !state.collapsedGroups.has(group.status.id)
+                open: !collapsed.has(group.status.id)
             },
             h('summary', null, h('span', { text: group.status.name }), h('span', { class: 'redmana-uo-count', text: String(group.issues.length) })),
             h('ul', { class: 'redmana-uo-issues' }, group.issues.map(issue => renderIssueRow(issue, state))));
 
+            // Also fires for the initial `open` of every render, so only act on a real change.
             details.addEventListener('toggle', () => {
-                if (details.open) state.collapsedGroups.delete(group.status.id);
-                else state.collapsedGroups.add(group.status.id);
+                if (!state.collapsedGroups) state.collapsedGroups = collapsed;
+                const wasCollapsed = state.collapsedGroups.has(group.status.id);
+                if (details.open && wasCollapsed) {
+                    state.collapsedGroups.delete(group.status.id);
+                    loadMissingHistory(state, group.issues);
+                } else if (!details.open && !wasCollapsed) {
+                    state.collapsedGroups.add(group.status.id);
+                }
             });
             return details;
         })
